@@ -14,8 +14,6 @@
 #include <esp_system.h> 
 #include <esp_log.h> 
 
-#define DRIVER_BLE_TAG "DRIVER_BLE"
-
 #define NUM_PERFILES            1
 #define IDX_APP_PERFIL          0
 #define ID_INST_SVC             0
@@ -24,6 +22,17 @@
 
 #define ADV_CONFIG_FLAG             (1 << 0)
 #define SCAN_RSP_CONFIG_FLAG        (1 << 1)
+
+typedef enum {
+  INACTIVO,
+  INICIALIZADO,
+  ANUNCIANDO,
+  EMPAREJANDO,
+  EMPAREJADO,
+  DESCONECTADO
+} estado_ble_t;
+
+estado_ble_t estado_dispositivo = EMPAREJADO;
 
 /* Atributos GATT del servicio de hidratacion perfil. */
 enum {
@@ -62,7 +71,7 @@ static char nombre_dispositivo[16] = "Hydrate-0000";
 uint16_t tabla_handles[HIDR_IDX_NB + BAT_IDX_NB -1];
 
 static uint8_t uuid_servicio_hidr[16] = {
-    0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x11, 0xF0, 0xD7, 0x00, 0x00,
+    0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0xf5, 0x19, 0x00, 0x00,
 };
 
 static uint8_t uuid_servicio_bat[16] = {

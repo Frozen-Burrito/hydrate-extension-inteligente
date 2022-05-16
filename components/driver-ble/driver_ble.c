@@ -1,5 +1,7 @@
 #include "driver_ble.h"
 
+static const char* TAG = "DRIVER-BLE";
+
 void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param)
 {
     // Si el tipo de evento es ESP_GATTS_REG_EVT, almacenar el gatts_if de cada perfil.
@@ -11,7 +13,7 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp
 
         } else 
         {
-            ESP_LOGE(DRIVER_BLE_TAG, "No se pudo registrar el perfil, app_id %04x, status %d",
+            ESP_LOGE(TAG, "No se pudo registrar el perfil, app_id %04x, status %d",
                     param->reg.app_id,
                     param->reg.status);
             return;
@@ -58,25 +60,26 @@ void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* par
             // Revisar si el advertising comenzó con éxito.
             if (param->adv_start_cmpl.status != ESP_BT_STATUS_SUCCESS)
             {
-                ESP_LOGE(DRIVER_BLE_TAG, "No se pudo comenzar el advertising");
+                ESP_LOGE(TAG, "No se pudo comenzar el advertising");
             } else 
             {
-                ESP_LOGI(DRIVER_BLE_TAG, "Advertising comenzado");
+                ESP_LOGI(TAG, "Advertising comenzado");
+                estado_dispositivo = ANUNCIANDO;
             }
             break;
         case ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT:
             // Revisar si el advertising fue detenido exitosamente.
             if (param->adv_stop_cmpl.status != ESP_BT_STATUS_SUCCESS)
             {
-                ESP_LOGE(DRIVER_BLE_TAG, "Error deteniendo el advertising");
+                ESP_LOGE(TAG, "Error deteniendo el advertising");
             } else 
             {
-                ESP_LOGI(DRIVER_BLE_TAG, "Advertising detenido");
+                ESP_LOGI(TAG, "Advertising detenido");
             }
             break;
         case ESP_GAP_BLE_UPDATE_CONN_PARAMS_EVT:
             ESP_LOGI(
-                DRIVER_BLE_TAG, 
+                TAG, 
                 "Parámetros de conexión actualizados:\nstatus = %d\nmin_int = %d\nmax_int = %d\nconn_int = %d\nlatency = %d\ntimeout = %d",
                 param->update_conn_params.status,
                 param->update_conn_params.min_int,
@@ -85,6 +88,8 @@ void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* par
                 param->update_conn_params.latency,
                 param->update_conn_params.timeout
             );
+
+            estado_dispositivo = EMPAREJADO;
             break;
         
         default:
@@ -95,6 +100,8 @@ void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* par
 esp_err_t init_driver_ble(const char* nombre, uint16_t uuid_app)
 {
     esp_err_t status = ESP_OK;
+    estado_dispositivo = INACTIVO;
+
     esp_bt_controller_config_t config = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
 
     strncpy(nombre_dispositivo, nombre, 16);
@@ -104,7 +111,7 @@ esp_err_t init_driver_ble(const char* nombre, uint16_t uuid_app)
 
     if (status != ESP_OK)
     {
-        ESP_LOGE(DRIVER_BLE_TAG, "Error en la inicialización del controlador con configuración por defecto.");
+        ESP_LOGE(TAG, "Error en la inicialización del controlador con configuración por defecto.");
         return status;
     }
 
@@ -112,7 +119,7 @@ esp_err_t init_driver_ble(const char* nombre, uint16_t uuid_app)
 
     if (status != ESP_OK)
     {
-        ESP_LOGE(DRIVER_BLE_TAG, "El controlador no pudo ser activado");
+        ESP_LOGE(TAG, "El controlador no pudo ser activado");
         return status;
     }
 
@@ -120,7 +127,7 @@ esp_err_t init_driver_ble(const char* nombre, uint16_t uuid_app)
 
     if (status != ESP_OK)
     {
-        ESP_LOGE(DRIVER_BLE_TAG, "La inicialización de Bluedroid falló.");
+        ESP_LOGE(TAG, "La inicialización de Bluedroid falló.");
         return status;
     }
 
@@ -128,7 +135,7 @@ esp_err_t init_driver_ble(const char* nombre, uint16_t uuid_app)
 
     if (status != ESP_OK)
     {
-        ESP_LOGE(DRIVER_BLE_TAG, "La activación de Bluedroid falló.");
+        ESP_LOGE(TAG, "La activación de Bluedroid falló.");
         return status;
     }
 
@@ -136,7 +143,7 @@ esp_err_t init_driver_ble(const char* nombre, uint16_t uuid_app)
 
     if (status != ESP_OK)
     {
-        ESP_LOGE(DRIVER_BLE_TAG, "No se pudo registrar el receptor de calbacks GATT: %x", status);
+        ESP_LOGE(TAG, "No se pudo registrar el receptor de calbacks GATT: %x", status);
         return status;
     }
 
@@ -144,7 +151,7 @@ esp_err_t init_driver_ble(const char* nombre, uint16_t uuid_app)
 
     if (status != ESP_OK)
     {
-        ESP_LOGE(DRIVER_BLE_TAG, "No se pudo registrar el receptor de calbacks GAP, err: %x", status);
+        ESP_LOGE(TAG, "No se pudo registrar el receptor de calbacks GAP, err: %x", status);
         return status;
     }
 
@@ -152,13 +159,19 @@ esp_err_t init_driver_ble(const char* nombre, uint16_t uuid_app)
 
     if (status != ESP_OK)
     {
-        ESP_LOGE(DRIVER_BLE_TAG, "No se pudo registrar la app, err: %x", status);
+        ESP_LOGE(TAG, "No se pudo registrar la app, err: %x", status);
         return status;
     }
 
     esp_err_t local_mtu_result = esp_ble_gatt_set_local_mtu(500);
-    if (local_mtu_result){
-        ESP_LOGE(DRIVER_BLE_TAG, "No se pudo configurar el nivel MTU local, err: %x", local_mtu_result);
+    if (local_mtu_result) 
+    {
+        ESP_LOGE(TAG, "No se pudo configurar el nivel MTU local, err: %x", local_mtu_result);
+    }
+
+    if (ESP_OK == status) 
+    {
+        estado_dispositivo = INICIALIZADO;
     }
 
     return status;
@@ -173,13 +186,13 @@ void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts
             adv_status = esp_ble_gap_set_device_name(nombre_dispositivo);
             
             if (ESP_OK != adv_status) {
-                ESP_LOGE(DRIVER_BLE_TAG, "No se pudo configurar el nombre del dispositivo, err: %x", adv_status);
+                ESP_LOGE(TAG, "No se pudo configurar el nombre del dispositivo, err: %x", adv_status);
             }
 
             // Config adv data.
             adv_status = esp_ble_gap_config_adv_data(&datos_descubrimiento);
             if (adv_status){
-                ESP_LOGE(DRIVER_BLE_TAG, "Fallo en configuración de adv, err: %x", adv_status);
+                ESP_LOGE(TAG, "Fallo en configuración de adv, err: %x", adv_status);
             }
 
             config_adv_lista |= ADV_CONFIG_FLAG;
@@ -187,7 +200,7 @@ void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts
             // Config scan response data
             adv_status = esp_ble_gap_config_adv_data(&datos_resp_scan);
             if (adv_status){
-                ESP_LOGE(DRIVER_BLE_TAG, "Fallo en configuración de respuesta a scan, err: %x", adv_status);
+                ESP_LOGE(TAG, "Fallo en configuración de respuesta a scan, err: %x", adv_status);
             }
 
             config_adv_lista |= SCAN_RSP_CONFIG_FLAG;
@@ -195,30 +208,32 @@ void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts
             // Create the attribute table
             esp_err_t create_attr_status = esp_ble_gatts_create_attr_tab(gatt_db, gatts_if, HIDR_IDX_NB + BAT_IDX_NB -1, ID_INST_SVC);
             if (create_attr_status){
-                ESP_LOGE(DRIVER_BLE_TAG, "No se pudo crear la tabla de atributos, err: %x", create_attr_status);
+                ESP_LOGE(TAG, "No se pudo crear la tabla de atributos, err: %x", create_attr_status);
             }
+
+            // estado_dispositivo = EMPAREJANDO;
         }
        	    break;
                
         case ESP_GATTS_READ_EVT:
-            ESP_LOGI(DRIVER_BLE_TAG, "ESP_GATTS_READ_EVT");
+            ESP_LOGI(TAG, "ESP_GATTS_READ_EVT");
        	    break;
 
         case ESP_GATTS_MTU_EVT:
-            ESP_LOGI(DRIVER_BLE_TAG, "ESP_GATTS_MTU_EVT, MTU %d", param->mtu.mtu);
+            ESP_LOGI(TAG, "ESP_GATTS_MTU_EVT, MTU %d", param->mtu.mtu);
             break;
 
         case ESP_GATTS_CONF_EVT:
-            ESP_LOGI(DRIVER_BLE_TAG, "ESP_GATTS_CONF_EVT, status = %d, attr_handle %d", param->conf.status, param->conf.handle);
+            ESP_LOGI(TAG, "ESP_GATTS_CONF_EVT, status = %d, attr_handle %d", param->conf.status, param->conf.handle);
             break;
 
         case ESP_GATTS_START_EVT:
-            ESP_LOGI(DRIVER_BLE_TAG, "SERVICE_START_EVT, status %d, service_handle %d", param->start.status, param->start.service_handle);
+            ESP_LOGI(TAG, "SERVICE_START_EVT, status %d, service_handle %d", param->start.status, param->start.service_handle);
             break;
 
         case ESP_GATTS_CONNECT_EVT:
-            ESP_LOGI(DRIVER_BLE_TAG, "ESP_GATTS_CONNECT_EVT, conn_id = %d", param->connect.conn_id);
-            esp_log_buffer_hex(DRIVER_BLE_TAG, param->connect.remote_bda, 6);
+            ESP_LOGI(TAG, "ESP_GATTS_CONNECT_EVT, conn_id = %d", param->connect.conn_id);
+            esp_log_buffer_hex(TAG, param->connect.remote_bda, 6);
             esp_ble_conn_update_params_t conn_params = {0};
             memcpy(conn_params.bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
 
@@ -229,10 +244,14 @@ void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts
 
             //Enviar los parámetros de conección actualizados al dispositivo emparejado.
             esp_ble_gap_update_conn_params(&conn_params);
+
+            estado_dispositivo = EMPAREJADO;
             break;
 
         case ESP_GATTS_DISCONNECT_EVT:
-            ESP_LOGI(DRIVER_BLE_TAG, "ESP_GATTS_DISCONNECT_EVT, reason = 0x%x", param->disconnect.reason);
+            estado_dispositivo = DESCONECTADO;
+
+            ESP_LOGI(TAG, "ESP_GATTS_DISCONNECT_EVT, reason = 0x%x", param->disconnect.reason);
             esp_ble_gap_start_advertising(&params_descubrimiento);
             break;
 
@@ -240,14 +259,14 @@ void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts
         {
             if (param->add_attr_tab.status != ESP_GATT_OK)
             {
-                ESP_LOGE(DRIVER_BLE_TAG, "Fallo en creación de tabla de atributos, err: 0x%x", param->add_attr_tab.status);
+                ESP_LOGE(TAG, "Fallo en creación de tabla de atributos, err: 0x%x", param->add_attr_tab.status);
             }
             else if (param->add_attr_tab.num_handle != HIDR_IDX_NB + BAT_IDX_NB -1){
-                ESP_LOGE(DRIVER_BLE_TAG, "create attribute table abnormally, num_handle (%d) \
+                ESP_LOGE(TAG, "create attribute table abnormally, num_handle (%d) \
                         no es igual a la HIDR_IDX_NB + BAT_IDX_NB -1(%d)", param->add_attr_tab.num_handle, HIDR_IDX_NB + BAT_IDX_NB -1);
             }
             else {
-                ESP_LOGI(DRIVER_BLE_TAG, "Tabla de atributos creada, handle = %d\n",param->add_attr_tab.num_handle);
+                ESP_LOGI(TAG, "Tabla de atributos creada, handle = %d\n",param->add_attr_tab.num_handle);
                 memcpy(tabla_handles, param->add_attr_tab.handles, sizeof(tabla_handles));
 
                 esp_ble_gatts_start_service(tabla_handles[IDX_SVC_HIDRATACION]);

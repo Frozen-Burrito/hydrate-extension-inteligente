@@ -9,5 +9,9 @@
         "target/esp32.cfg"
     ],
     "idf.pythonBinPathWin": "C:/Users/f3rm3/.espressif/python_env/idf4.3_py3.8_env/Scripts/python.exe",
-    "idf.toolsPathWin": "C:\\Users\\f3rm3\\.espressif"
+    "idf.toolsPathWin": "C:\\Users\\f3rm3\\.espressif",
+    "files.associations": {
+        "*.ejs": "html",
+        "*.inc": "c"
+    }
 }
