@@ -32,7 +32,7 @@ typedef enum {
   DESCONECTADO
 } estado_ble_t;
 
-estado_ble_t estado_dispositivo = EMPAREJADO;
+// estado_ble_t estado_dispositivo = EMPAREJADO;
 
 /* Atributos GATT del servicio de hidratacion perfil. */
 enum {

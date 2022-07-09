@@ -50,11 +50,11 @@ void task_conexion_ble(void* pvParameters)
 
     while (true) 
     {
-        if (EMPAREJADO == estado_dispositivo) {
-            ESP_LOGI(TAG, "Dispositivo BLE emparejado, perfil es accesible.");
-        } else {
-            ESP_LOGI(TAG, "Dispositivo BLE no está emparejado: %d", estado_dispositivo);
-        }
+        // if (EMPAREJADO == estado_dispositivo) {
+        //     ESP_LOGI(TAG, "Dispositivo BLE emparejado, perfil es accesible.");
+        // } else {
+        //     ESP_LOGI(TAG, "Dispositivo BLE no está emparejado: %d", estado_dispositivo);
+        // }
         vTaskDelay(pdMS_TO_TICKS(2000));
     }
 

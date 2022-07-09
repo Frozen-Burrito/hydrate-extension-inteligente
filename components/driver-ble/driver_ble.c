@@ -64,7 +64,7 @@ void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* par
             } else 
             {
                 ESP_LOGI(TAG, "Advertising comenzado");
-                estado_dispositivo = ANUNCIANDO;
+                // estado_dispositivo = ANUNCIANDO;
             }
             break;
         case ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT:
@@ -89,7 +89,7 @@ void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* par
                 param->update_conn_params.timeout
             );
 
-            estado_dispositivo = EMPAREJADO;
+            // estado_dispositivo = EMPAREJADO;
             break;
         
         default:
@@ -100,7 +100,7 @@ void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* par
 esp_err_t init_driver_ble(const char* nombre, uint16_t uuid_app)
 {
     esp_err_t status = ESP_OK;
-    estado_dispositivo = INACTIVO;
+    // estado_dispositivo = INACTIVO;
 
     esp_bt_controller_config_t config = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
 
@@ -171,7 +171,7 @@ esp_err_t init_driver_ble(const char* nombre, uint16_t uuid_app)
 
     if (ESP_OK == status) 
     {
-        estado_dispositivo = INICIALIZADO;
+        // estado_dispositivo = INICIALIZADO;
     }
 
     return status;
@@ -245,11 +245,11 @@ void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts
             //Enviar los parámetros de conección actualizados al dispositivo emparejado.
             esp_ble_gap_update_conn_params(&conn_params);
 
-            estado_dispositivo = EMPAREJADO;
+            // estado_dispositivo = EMPAREJADO;
             break;
 
         case ESP_GATTS_DISCONNECT_EVT:
-            estado_dispositivo = DESCONECTADO;
+            // estado_dispositivo = DESCONECTADO;
 
             ESP_LOGI(TAG, "ESP_GATTS_DISCONNECT_EVT, reason = 0x%x", param->disconnect.reason);
             esp_ble_gap_start_advertising(&params_descubrimiento);

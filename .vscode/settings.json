@@ -1,17 +1,12 @@
 {
-    "C_Cpp.intelliSenseEngine": "Tag Parser",
-    "idf.adapterTargetName": "esp32",
-    "idf.customExtraPaths": "C:\\Users\\f3rm3\\.espressif\\tools\\xtensa-esp32-elf\\esp-2021r1-8.4.0\\xtensa-esp32-elf\\bin;C:\\Users\\f3rm3\\.espressif\\tools\\xtensa-esp32s2-elf\\esp-2021r1-8.4.0\\xtensa-esp32s2-elf\\bin;C:\\Users\\f3rm3\\.espressif\\tools\\xtensa-esp32s3-elf\\esp-2021r1-8.4.0\\xtensa-esp32s3-elf\\bin;C:\\Users\\f3rm3\\.espressif\\tools\\riscv32-esp-elf\\esp-2021r1-8.4.0\\riscv32-esp-elf\\bin;C:\\Users\\f3rm3\\.espressif\\tools\\esp32ulp-elf\\2.28.51-esp-20191205\\esp32ulp-elf-binutils\\bin;C:\\Users\\f3rm3\\.espressif\\tools\\esp32s2ulp-elf\\2.28.51-esp-20191205\\esp32s2ulp-elf-binutils\\bin;C:\\Users\\f3rm3\\.espressif\\tools\\cmake\\3.16.4\\bin;C:\\Users\\f3rm3\\.espressif\\tools\\openocd-esp32\\v0.10.0-esp32-20210401\\openocd-esp32\\bin;C:\\Users\\f3rm3\\.espressif\\tools\\ninja\\1.10.2;C:\\Users\\f3rm3\\.espressif\\tools\\idf-exe\\1.0.1;C:\\Users\\f3rm3\\.espressif\\tools\\ccache\\3.7;C:\\Users\\f3rm3\\.espressif\\tools\\dfu-util\\0.9\\dfu-util-0.9-win64",
-    "idf.customExtraVars": "{\"OPENOCD_SCRIPTS\":\"C:\\\\Users\\\\f3rm3\\\\.espressif\\\\tools\\\\openocd-esp32\\\\v0.10.0-esp32-20210401/openocd-esp32/share/openocd/scripts\",\"IDF_CCACHE_ENABLE\":\"1\"}",
-    "idf.espIdfPathWin": "D:/Documentos/esp-idf/",
-    "idf.openOcdConfigs": [
-        "interface/ftdi/esp32_devkitjv1.cfg",
-        "target/esp32.cfg"
-    ],
-    "idf.pythonBinPathWin": "C:/Users/f3rm3/.espressif/python_env/idf4.3_py3.8_env/Scripts/python.exe",
-    "idf.toolsPathWin": "C:\\Users\\f3rm3\\.espressif",
     "files.associations": {
         "*.ejs": "html",
-        "*.inc": "c"
-    }
+        "driver_ble.h": "c"
+    },
+    "idf.adapterTargetName": "esp32",
+    "idf.openOcdConfigs": [
+        "interface/ftdi/esp32_devkitj_v1.cfg",
+        "target/esp32.cfg"
+    ],
+    "editor.tabSize": 4
 }
