@@ -55,7 +55,7 @@ enum {
 };
 
 enum {
-    IDX_SVC_BATERIA,        /* Índice del servicio de batería. */
+    IDX_SVC_BATERIA = HIDR_IDX_NB + 1,        /* Índice del servicio de batería. */
 
     BAT_IDX_CHAR_NIVEL,
     BAT_IDX_VAL_NIVEL,

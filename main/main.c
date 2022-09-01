@@ -64,7 +64,7 @@ static void callback_timer_sleep(TimerHandle_t timer)
 /**
  * TODO: Esta es una función temporal de prueba. 
  */ 
-void task_time(void* pvParameters) 
+static void task_time(void* pvParameters) 
 {
     time_t now;
     char strftime_buf[64];
@@ -92,7 +92,7 @@ void task_time(void* pvParameters)
  * @brief Inicia el driver BLE, maneja el estado de conexión con el 
  * dispositivo central y actualiza los datos en el perfil GATT.
  */
-void task_conexion_ble(void* pvParameters) 
+static void task_conexion_ble(void* pvParameters) 
 {
     xEventosBle = xEventGroupCreate();
 
@@ -145,7 +145,7 @@ void task_conexion_ble(void* pvParameters)
  * @param pvParameters Parámeteros opcionales para la tarea. No son 
  * usados por el momento.
  */ 
-void task_medidas_giroscopio(void* pvParameters)
+static void task_medidas_giroscopio(void* pvParameters)
 {
 
 }
@@ -153,7 +153,7 @@ void task_medidas_giroscopio(void* pvParameters)
 /**
  * @brief Obtiene mediciones del sensor de peso, después de calibrarlo.
  */ 
-void task_medidas_peso(void* pvParameters)
+static void task_medidas_peso(void* pvParameters)
 {
 
 }
@@ -162,7 +162,7 @@ void task_medidas_peso(void* pvParameters)
  * @brief Identifica si el usuario consume agua, si es así, crea un 
  * registro de hidratación.
  */ 
-void task_identificacion_hidratacion(void* pvParameters)
+static void task_identificacion_hidratacion(void* pvParameters)
 {
 
 }
@@ -173,7 +173,7 @@ void task_identificacion_hidratacion(void* pvParameters)
  * Prioridad: 
  * 
  */
-void task_almacenamiento_registros(void* pvParameters) 
+static void task_almacenamiento_registros(void* pvParameters) 
 {
 
 }
@@ -187,7 +187,7 @@ void task_almacenamiento_registros(void* pvParameters)
  * Las condiciones para el sueño profundo son:
  *  -  
  */
-void task_ahorro_energia(void* pvParameters) 
+static void task_ahorro_energia(void* pvParameters) 
 {
 
 }
@@ -210,35 +210,35 @@ void app_main(void)
     // Asegurar que NVS haya sido inicializado.
     ESP_ERROR_CHECK(status_nvs);
 
-    bool conSleep = MODO_FUNCIONAMIENTO == MODO_COMPLETO
+    BaseType_t conSleep = MODO_FUNCIONAMIENTO == MODO_COMPLETO
         || MODO_FUNCIONAMIENTO != MODO_SIN_SLEEP;
 
-    bool incluirBle = MODO_FUNCIONAMIENTO == MODO_COMPLETO 
+    BaseType_t incluirBle = MODO_FUNCIONAMIENTO == MODO_COMPLETO 
         || MODO_FUNCIONAMIENTO == MODO_SOLO_BLE
         || MODO_FUNCIONAMIENTO == MODO_SIN_SLEEP;
 
-    bool incluirSensores = MODO_FUNCIONAMIENTO == MODO_COMPLETO 
+    BaseType_t incluirSensores = MODO_FUNCIONAMIENTO == MODO_COMPLETO 
         || MODO_FUNCIONAMIENTO == MODO_SOLO_SENSORES
         || MODO_FUNCIONAMIENTO == MODO_SIN_SLEEP;
 
-    xTaskCreatePinnedToCore(task_almacenamiento_registros, "almacenamiento", 2048, NULL, 5 NULL, 1);
-    xTaskCreatePinnedToCore(task_identificacion_hidratacion, "identificacion", 2048, NULL, 5 NULL, 1);
+    xTaskCreatePinnedToCore(task_almacenamiento_registros, "almacenamiento", 2048, NULL, 5, NULL, APP_CPU_NUM);
+    xTaskCreatePinnedToCore(task_identificacion_hidratacion, "identificacion", 2048, NULL, 5, NULL, APP_CPU_NUM);
 
     // Crear tasks, según el modo de operación.
     if (incluirBle)
     {
-        xTaskCreatePinnedToCore(task_conexion_ble, "Task Driver BLE", 4096, NULL, 5, NULL, 1);
+        xTaskCreatePinnedToCore(task_conexion_ble, "Task Driver BLE", 4096, NULL, 5, NULL, APP_CPU_NUM);
     }
 
     if (incluirSensores) 
     {
-        xTaskCreatePinnedToCore(task_medidas_giroscopio, "medidas_gyro", 2048, NULL, 5 NULL, 1);
-        xTaskCreatePinnedToCore(task_medidas_peso, "medidas_peso", 2048, NULL, 5 NULL, 1);
+        xTaskCreatePinnedToCore(task_medidas_giroscopio, "medidas_gyro", 2048, NULL, 5, NULL, APP_CPU_NUM);
+        xTaskCreatePinnedToCore(task_medidas_peso, "medidas_peso", 2048, NULL, 5, NULL, APP_CPU_NUM);
     }
 
     if (conSleep)
     {
-        xTaskCreatePinnedToCore(task_ahorro_energia, "ahorro_energia", 2048, NULL, 3 NULL, 1);
+        xTaskCreatePinnedToCore(task_ahorro_energia, "ahorro_energia", 2048, NULL, 3, NULL, APP_CPU_NUM);
     }
     // xTaskCreatePinnedToCore(task_time, "task_tiempo", 2048, NULL, 3, NULL, 1);
 }
