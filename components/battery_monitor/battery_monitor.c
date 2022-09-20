@@ -29,7 +29,7 @@ static void find_calibration_in_efuse(void);
 
 static esp_err_t sample_adc(uint32_t* out_voltage_mv, size_t num_samples);
 
-esp_err_t battery_sensor_init(void)
+esp_err_t battery_monitor_init(void)
 {
     esp_err_t status = ESP_OK;
 
