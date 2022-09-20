@@ -5,7 +5,7 @@
 #include "storage.h"
 
 static const char* TAG = "STORAGE";
-static const char* recordsNvsNamespace = CONFIG_HYDRATION_RECORD_NVS_NAMESPACE
+static const char* recordsNvsNamespace = CONFIG_HYDRATION_RECORD_NVS_NAMESPACE;
 
 // Nombres de llaves NVS (la longitud de una llave debe ser < NVS_KEY_NAME_MAX_SIZE-1)
 static const char* recordCountKey = "record_count";
