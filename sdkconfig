@@ -129,6 +129,14 @@ CONFIG_PARTITION_TABLE_MD5=y
 # end of Partition Table
 
 #
+# Sensor and measurement configuration
+#
+CONFIG_HX711_PD_SCK_GPIO=18
+CONFIG_HX711_DATA_OUT_GPIO=19
+CONFIG_HX711_AVG_SAMPLES_COUNT=5
+# end of Sensor and measurement configuration
+
+#
 # NVS Storage
 #
 CONFIG_HYDRATION_RECORD_NVS_NAMESPACE="hydr-records"

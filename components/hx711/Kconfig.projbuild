@@ -1,0 +1,19 @@
+menu "Sensor and measurement configuration"
+
+    config HX711_PD_SCK_GPIO
+        int "PD/SCK GPIO number"
+        default 18 if IDF_TARGET_ESP32
+        help
+            GPIO number connected to PD/SCK pin of hx711
+
+    config HX711_DATA_OUT_GPIO
+        int "Data out (DOUT) GPIO number"
+        default 19 if IDF_TARGET_ESP32
+        help
+            GPIO number connected to DOUT pin of hx711
+
+    config HX711_AVG_SAMPLES_COUNT
+        int "Number of hx711 measurement samples to average"
+        default 5
+        
+endmenu
