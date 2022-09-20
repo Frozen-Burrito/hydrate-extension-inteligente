@@ -2,9 +2,9 @@
 #include <stdlib.h>
 #include <time.h>
 
-#include "freertos/FreeRTOS.h"
+#include <freertos/FreeRTOS.h>
 
-#include "hydrate-common.h"
+#include "hydrate_common.h"
 
 static const uint32_t seed = 234; 
 static BaseType_t hasAlreadySeeded = pdFALSE;

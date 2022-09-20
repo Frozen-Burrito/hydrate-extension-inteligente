@@ -1,0 +1,7 @@
+menu "NVS Storage"
+    
+    config HYDRATION_RECORD_NVS_NAMESPACE
+        string "Hydration record NVS namespace"
+        default "hydr-records"
+
+endmenu

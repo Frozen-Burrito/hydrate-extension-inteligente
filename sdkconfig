@@ -129,6 +129,12 @@ CONFIG_PARTITION_TABLE_MD5=y
 # end of Partition Table
 
 #
+# NVS Storage
+#
+CONFIG_HYDRATION_RECORD_NVS_NAMESPACE="hydr-records"
+# end of NVS Storage
+
+#
 # Compiler options
 #
 CONFIG_COMPILER_OPTIMIZATION_DEFAULT=y
