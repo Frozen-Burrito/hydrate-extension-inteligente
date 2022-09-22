@@ -383,6 +383,8 @@ static void record_generator_task(void* pvParameters)
             waitForReadingsTimeoutMs
         );
 
+        readingsWereReceived = pdPASS;
+
         if (readingsWereReceived) 
         {
             //TODO: algoritmo para determinar si las mediciones en readingsBuffer
@@ -404,7 +406,7 @@ static void record_generator_task(void* pvParameters)
 
                 if (batteryDataAvailable == pdPASS) 
                 {
-                    hydrationRecord.battery_level = battery_measurement.remaining_charge; 
+                    // hydrationRecord.battery_level = battery_measurement.remaining_charge; 
                 }
 
                 bool wasRecordStored = false;
@@ -462,7 +464,7 @@ static void communication_task(void* pvParameters)
     static const TickType_t SYNC_FAILED_BACKOFF_DELAY = pdMS_TO_TICKS(5000);
 
     static const uint32_t waitForPairedStatusTimeoutMS = 5000;
-    static const TickType_t recordReadPeriod = pdMS_TO_TICKS(250); 
+    static const uint32_t recordReadTimeoutMS = 5000; 
 
     hydration_record_t xRecordToSync = { 0, 0, 0, 0 };
 
@@ -479,9 +481,6 @@ static void communication_task(void* pvParameters)
     {
         ble_status_t status = ble_wait_for_state(PAIRED, true, waitForPairedStatusTimeoutMS);
 
-        ESP_LOGI(TAG, "Status BLE (PAIRED = %i): %i", PAIRED, status);
-        ESP_LOGI(TAG, "Status BLE es PAIRED: %i", (PAIRED == status));
-
         bool isPaired = PAIRED == status;
 
         if (isPaired) {
@@ -492,9 +491,6 @@ static void communication_task(void* pvParameters)
             int32_t totalRecordsPendingSync = uxQueueMessagesWaiting(xSyncQueue);
 
             BaseType_t hasRemainingRecordsToSync = totalRecordsPendingSync > 0;
-
-            // Actualizar el número de registros pendientes, comunicado por BLE.
-            ble_set_pending_records_count(totalRecordsPendingSync);
 
             // Iterar mientras la extensión esté PAIRED, queden registros de hidratación 
             // por sincronizar, los intentos de sincronización no superen a MAX_SYNC_ATTEMPTS
@@ -514,47 +510,22 @@ static void communication_task(void* pvParameters)
                     pdMS_TO_TICKS(1000) //TODO: determinar si este timeout es necesario.
                 );
 
-                bool wasRecordSynchronized = false;
-
-                uint8_t remainingRecords = totalRecordsPendingSync - synchronizedRecordsCount;
-                uint8_t expectedRemainingRecordCount = remainingRecords - 1;
-                uint8_t recordsCountAfterRead = remainingRecords;
-
                 if (wasRecordReceived) {
                     // El registro de hidratación fue recibido con éxito desde
                     // xSyncQueue. Es posible sincronizarlo a través de BLE.
-                    esp_err_t sync_status = ble_synchronize_hydration_record(&xRecordToSync);
 
+                    // El modificar el perfil GATT BLE con los datos del
+                    // registro de hidratación. Bloquear esta task por un 
+                    // momento, hasta que el cliente confirme que obtuvo el registro o
+                    // timeout expire. 
+                    esp_err_t sync_status = ble_synchronize_hydration_record(&xRecordToSync, recordReadTimeoutMS);
+
+                    // Determinar si el registro pudo ser sincronizado, según sync_status:
                     if (ESP_OK == sync_status) {
-                        // El perfil GATT BLE fue modificado con los datos del
-                        // registro de hidratación. Bloquear esta task por un 
-                        // momento, para dar tiempo al cliente de leer el 
-                        // registro.
-                        vTaskDelay(recordReadPeriod);
-
-                        sync_status = ble_get_pending_records_count(&recordsCountAfterRead);
-
-                        if (ESP_OK == sync_status && recordsCountAfterRead == expectedRemainingRecordCount) {
-                            // El registro de hidratación fue recibido por el
-                            // cliente con éxito. Indicarlo con una variable "bandera":
-                            wasRecordSynchronized = true;
-                        }
-
-                    } else {
-                        ESP_LOGW(
-                            TAG, 
-                            "Error al sincronizar registro con BLE (%s)",
-                            esp_err_to_name(sync_status)
-                        );
-                    }
-
-                    // Determinar si el registro pudo ser sincronizado, según el 
-                    // estado de la variable bandera:
-                    if (wasRecordSynchronized) {
+                        // El registro de hidratación fue recibido por el
+                        // cliente con éxito. Indicarlo con una variable "bandera":
                         ++synchronizedRecordsCount;
                         syncAttemptsForCurrentRecord = 0;
-
-                        ble_set_pending_records_count(recordsCountAfterRead);
 
                         // Si el registro pudo ser sincronizado y recibido por
                         // el cliente, removerlo de xSyncQueue para señalizar
@@ -565,15 +536,22 @@ static void communication_task(void* pvParameters)
                             pdMS_TO_TICKS(1000) //TODO: determinar si este timeout es necesario.
                         );
 
-                        ESP_LOGI(TAG, "Registro obtenido por el dispositivo periferico, restantes = %i", recordsCountAfterRead);
-                    } else {
-                        // Si el registro no fue obtenido por el dispositivo periférico,
-                        // incrementar la cuenta de intentos.
+                        ESP_LOGI(TAG, "Registro obtenido por el dispositivo periferico, restantes = %i", (totalRecordsPendingSync - synchronizedRecordsCount));
+
+                    } else if (ESP_ERR_TIMEOUT == sync_status) {
+                        // Si el registro no fue obtenido por el dispositivo periférico
+                        // (el timeout expiró sin confirmación), incrementar la cuenta de intentos.
                         ++syncAttemptsForCurrentRecord;
                         ESP_LOGW(
                             TAG, 
-                            "Registro sincronizado, pero no obtenido por dispositivo periferico, restantes = %i",
-                            remainingRecords
+                            "Registro sincronizado, pero no fue obtenido por dispositivo periferico, restantes = %i",
+                            (totalRecordsPendingSync - synchronizedRecordsCount)
+                        );
+                    } else {
+                        ESP_LOGW(
+                            TAG, 
+                            "Error al sincronizar registro con BLE (%s)",
+                            esp_err_to_name(sync_status)
                         );
                     }
 

@@ -10,6 +10,7 @@ static const char* TAG = "BLE";
 
 #define INST_SVC_ID 0
 #define MAX_GATTS_CHAR_LEN_BYTES 500
+#define PREPARE_BUF_MAX_SIZE 1024
 #define CHAR_DECLARATION_SIZE (sizeof(uint8_t))
 
 typedef struct {
@@ -30,24 +31,57 @@ static const EventBits_t INITIALIZING_BIT = ( 1 << 1 );
 static const EventBits_t ADVERTISING_BIT = ( 1 << 2 );
 static const EventBits_t PAIRING_BIT = ( 1 << 3 );
 static const EventBits_t PAIRED_BIT = ( 1 << 4 );
-static const EventBits_t ALL_BITS = INACTIVE | INITIALIZING_BIT | ADVERTISING_BIT | PAIRING_BIT | PAIRED_BIT;
+static const EventBits_t RECORD_SYNCHRONIZED_BIT = ( 1 << 5 );
+static const EventBits_t ALL_BITS = INACTIVE | INITIALIZING_BIT | ADVERTISING_BIT | PAIRING_BIT | PAIRED_BIT | RECORD_SYNCHRONIZED_BIT;
 
 static const uint16_t ADV_CONFIG_FLAG = (1 << 0);
 static const uint16_t SCAN_RESPONSE_CONFIG_FLAG = (1 << 1);
 
 static uint8_t adv_config_done = 0x00;
 
+static uint16_t gatt_mtu = 23;
+
 static uint8_t hydration_service_uuid[ESP_UUID_LEN_128] = {
     0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0xf5, 0x19, 0x00, 0x00,
 };
 static uint8_t battery_service_uuid[ESP_UUID_LEN_16] = {
-    0x0F, 0x18
+    0x0f, 0x18
 };
 
 static uint16_t hydration_handle_table[HYDR_IDX_NB];
 static uint16_t battery_handle_table[BAT_IDX_NB];
 
 static const char device_name[16] = "Hydrate-0000";
+
+struct gatts_profile_inst {
+    esp_gatts_cb_t gatts_cb;
+    uint16_t gatts_if;
+    uint16_t app_id;
+    uint16_t conn_id;
+    uint16_t service_handle;
+    esp_gatt_srvc_id_t service_id;
+    uint16_t char_handle;
+    esp_bt_uuid_t char_uuid;
+    esp_gatt_perm_t perm;
+    esp_gatt_char_prop_t property;
+    uint16_t descr_handle;
+    esp_bt_uuid_t descr_uuid;
+};
+
+typedef struct {
+    uint8_t* buffer;
+    size_t length;
+} prepare_type_env_t;
+
+static prepare_type_env_t prepare_write_env;
+static prepare_type_env_t prepare_read_buf;
+
+typedef struct {
+    uint16_t conn_id;
+    esp_gatt_if_t gatt_if;
+} gatts_profile_inst_t;
+
+static gatts_profile_inst_t gatt_profile;
 
 static const uint32_t AMOUNT_ML_GATTS_CHAR_UUID = 0x0faf892c;
 static const uint16_t TEMP_GATTS_CHAR_UUID = 0x2a6e;
@@ -96,13 +130,14 @@ static esp_ble_adv_data_t scan_response_data = {
     .flag = (ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT),
 };
 
-static const uint16_t primary_service_uuid       = ESP_GATT_UUID_PRI_SERVICE;
+static const uint16_t primary_service_uuid        = ESP_GATT_UUID_PRI_SERVICE;
 // static const uint16_t secondary_service_uuid     = ESP_GATT_UUID_SEC_SERVICE;
-static const uint16_t char_declare_uuid        = ESP_GATT_UUID_CHAR_DECLARE;
+static const uint16_t char_declare_uuid           = ESP_GATT_UUID_CHAR_DECLARE;
 static const uint16_t char_client_config_uuid     = ESP_GATT_UUID_CHAR_CLIENT_CONFIG;
 static const uint8_t char_property_read           = ESP_GATT_CHAR_PROP_BIT_READ;
+// static const uint8_t char_property_write          = ESP_GATT_CHAR_PROP_BIT_WRITE;
 static const uint8_t char_property_read_write_notify = ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_NOTIFY;
-static const uint8_t ccc_char_idx_pending_records[2]    = {0x00, 0x00};
+static const uint8_t hydration_char_pending_ccc[2] = {0x00, 0x00};
 
 /* Descripción completa de las características de los servicios del perfil BLE. */
 static const esp_gatts_attr_db_t hydration_svc_attr_table[HYDR_IDX_NB] = {
@@ -118,7 +153,7 @@ static const esp_gatts_attr_db_t hydration_svc_attr_table[HYDR_IDX_NB] = {
 
     /* Configurar el valor de la caracteristica de mililitros. */
     [HYDR_IDX_VAL_MILILITERS] =
-    {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_32, (uint8_t *)&AMOUNT_ML_GATTS_CHAR_UUID, ESP_GATT_PERM_READ,
+    {{ESP_GATT_RSP_BY_APP}, {ESP_UUID_LEN_32, (uint8_t *)&AMOUNT_ML_GATTS_CHAR_UUID, ESP_GATT_PERM_READ,
       MAX_GATTS_CHAR_LEN_BYTES, sizeof(current_record.water_amount), (uint8_t *) current_record.water_amount}},
     
     /* Declaracion de la caracteristica de temperatura. */
@@ -128,7 +163,7 @@ static const esp_gatts_attr_db_t hydration_svc_attr_table[HYDR_IDX_NB] = {
 
     /* Configurar el valor de la caracteristica de temperatura. */
     [HYDR_IDX_VAL_TEMP] =
-    {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&TEMP_GATTS_CHAR_UUID, ESP_GATT_PERM_READ,
+    {{ESP_GATT_RSP_BY_APP}, {ESP_UUID_LEN_16, (uint8_t *)&TEMP_GATTS_CHAR_UUID, ESP_GATT_PERM_READ,
       MAX_GATTS_CHAR_LEN_BYTES, sizeof(current_record.temperature), (uint8_t *) current_record.temperature}},
     
     /* Declaracion de la caracteristica de fecha. */
@@ -138,7 +173,7 @@ static const esp_gatts_attr_db_t hydration_svc_attr_table[HYDR_IDX_NB] = {
 
     /* Configurar el valor de la caracteristica de fecha. */
     [HYDR_IDX_VAL_DATE] =
-    {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&DATE_GATTS_CHAR_UUID, ESP_GATT_PERM_READ,
+    {{ESP_GATT_RSP_BY_APP}, {ESP_UUID_LEN_16, (uint8_t *)&DATE_GATTS_CHAR_UUID, ESP_GATT_PERM_READ,
       MAX_GATTS_CHAR_LEN_BYTES, sizeof(current_record.timestamp), (uint8_t *) current_record.timestamp}},
     
     /* Declaracion de la caracteristica de registros nuevos. */
@@ -148,13 +183,13 @@ static const esp_gatts_attr_db_t hydration_svc_attr_table[HYDR_IDX_NB] = {
 
     /* Configurar el valor de la caracteristica de registros nuevos. */
     [HYDR_IDX_VAL_NUM_NEW_RECORDS] =
-    {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_32, (uint8_t *)&PENDING_RECORD_COUNT_GATTS_CHAR_UUID, ESP_GATT_PERM_READ,
+    {{ESP_GATT_RSP_BY_APP}, {ESP_UUID_LEN_32, (uint8_t *)&PENDING_RECORD_COUNT_GATTS_CHAR_UUID, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
       MAX_GATTS_CHAR_LEN_BYTES, sizeof(pending_records_count), (uint8_t *) &pending_records_count}},
 
     // Client Characteristic Configuration Descriptor (CCCD) de registros nuevos.
     [HYDR_IDX_CHAR_NUM_NEW_RECORDS_NTF_CFG] =
     {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&char_client_config_uuid, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
-      sizeof(uint16_t), sizeof(ccc_char_idx_pending_records), (uint8_t *)ccc_char_idx_pending_records}},
+      sizeof(uint16_t), sizeof(hydration_char_pending_ccc), (uint8_t *)hydration_char_pending_ccc}},
 };
 
 static const esp_gatts_attr_db_t battery_svc_attr_table[BAT_IDX_NB] = {
@@ -170,23 +205,8 @@ static const esp_gatts_attr_db_t battery_svc_attr_table[BAT_IDX_NB] = {
 
     /* Valor de la característica del nivel de batería. */
     [BAT_IDX_VAL_LEVEL] =
-    {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&BATTERY_LVL_GATTS_CHAR_UUID, ESP_GATT_PERM_READ,
+    {{ESP_GATT_RSP_BY_APP}, {ESP_UUID_LEN_16, (uint8_t *)&BATTERY_LVL_GATTS_CHAR_UUID, ESP_GATT_PERM_READ,
       MAX_GATTS_CHAR_LEN_BYTES, sizeof(current_record.battery_level), (uint8_t *) current_record.battery_level}},
-};
-
-struct gatts_profile_inst {
-    esp_gatts_cb_t gatts_cb;
-    uint16_t gatts_if;
-    uint16_t app_id;
-    uint16_t conn_id;
-    uint16_t service_handle;
-    esp_gatt_srvc_id_t service_id;
-    uint16_t char_handle;
-    esp_bt_uuid_t char_uuid;
-    esp_gatt_perm_t perm;
-    esp_gatt_char_prop_t property;
-    uint16_t descr_handle;
-    esp_bt_uuid_t descr_uuid;
 };
 
 static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param);
@@ -202,6 +222,24 @@ static ble_status_t event_bits_to_status(const EventBits_t bits);
 
 static const char* ble_status_to_string(const ble_status_t status);
 
+static void prepare_write_event(esp_gatt_if_t gatts_if, prepare_type_env_t* prepare_write_env, esp_ble_gatts_cb_param_t* param);
+
+static void exec_write_event(prepare_type_env_t* prepare_write_env, esp_ble_gatts_cb_param_t* param);
+
+static void handle_read_event(esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t* param);
+
+static uint16_t get_attribute_by_hydration_handle(uint16_t attribute_handle);
+
+static uint16_t get_attribute_by_battery_handle(uint16_t attribute_handle);
+
+static void handle_hydration_svc_read_evt(uint16_t attribute_index, esp_ble_gatts_cb_param_t* param, esp_gatt_rsp_t* response);
+
+static void handle_battery_svc_read_evt(uint16_t attribute_index, esp_ble_gatts_cb_param_t* param, esp_gatt_rsp_t* response);
+
+static void gatts_exec_read(esp_gatt_if_t gatts_if, prepare_type_env_t* prepare_read_env, esp_ble_gatts_cb_param_t* param, uint8_t *p_rsp_v, uint16_t v_len);
+
+static esp_gatt_status_t handle_hydration_svc_write_evt(uint16_t attribute_index, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t* param);
+
 static struct gatts_profile_inst hydration_profile_tab[NUMBER_OF_PROFILES] = {
     [APP_PROFILE_IDX] = {
         .gatts_cb = gatts_profile_event_handler,
@@ -209,6 +247,7 @@ static struct gatts_profile_inst hydration_profile_tab[NUMBER_OF_PROFILES] = {
     },
 };
 
+// Definiciones para funciones, tanto publicas como estaticas.
 esp_err_t ble_driver_init()
 {
     esp_err_t status = ESP_OK;
@@ -333,9 +372,8 @@ esp_err_t ble_driver_init()
     return status;
 }
 
-esp_err_t ble_synchronize_hydration_record(const hydration_record_t* record)
+esp_err_t ble_synchronize_hydration_record(const hydration_record_t* record, const uint32_t sync_timeout_ms)
 {
-    //TODO: completar esta función.
     for (int i = 0; i < sizeof(uint16_t); ++i) {
         current_record.water_amount[i] = (record->water_amount >> 8 * i) & 0xFF;
     }
@@ -352,15 +390,49 @@ esp_err_t ble_synchronize_hydration_record(const hydration_record_t* record)
 
     ESP_LOGI(
         TAG, 
-        "Registro convertido a buffers para ser sincronizado: { water: [%#X,%#X], temp: [%#X,%#X], bat: [%#X], time: [%#X,%#X,%#X,%#X,%#X,%#X,%#X,%#X]}",
-        current_record.water_amount[0], current_record.water_amount[1], 
-        current_record.temperature[0], current_record.temperature[1], 
-        current_record.battery_level[0],  
-        current_record.timestamp[0], current_record.timestamp[1], current_record.timestamp[2], current_record.timestamp[3],
-        current_record.timestamp[4], current_record.timestamp[5], current_record.timestamp[6], current_record.timestamp[7]
+        "Registro convertido a buffers para ser sincronizado (water_amount, temperature, battery_level, timestamp):"
     );
 
-    return ESP_OK;
+    ESP_LOG_BUFFER_HEX(TAG, current_record.water_amount, sizeof(current_record.water_amount));
+    ESP_LOG_BUFFER_HEX(TAG, current_record.temperature, sizeof(current_record.temperature));
+    ESP_LOG_BUFFER_HEX(TAG, current_record.battery_level, sizeof(current_record.battery_level));
+    ESP_LOG_BUFFER_HEX(TAG, current_record.timestamp, sizeof(current_record.timestamp));
+
+    xEventGroupClearBits(xBleConnectionStatus, RECORD_SYNCHRONIZED_BIT);
+
+    pending_records_count = 1;
+
+    esp_err_t notify_status = esp_ble_gatts_send_indicate(
+        gatt_profile.gatt_if,
+        gatt_profile.conn_id,
+        hydration_handle_table[HYDR_IDX_VAL_NUM_NEW_RECORDS],
+        sizeof(pending_records_count),
+        &pending_records_count,
+        false
+    );
+
+    if (ESP_OK == notify_status) 
+    {
+        // Esperar a recibir un WRITE_EVT en pending_records_count, o a timeout.
+        EventBits_t bleStatusBits = xEventGroupWaitBits(
+            xBleConnectionStatus,
+            RECORD_SYNCHRONIZED_BIT,
+            pdFALSE,
+            pdTRUE,
+            pdMS_TO_TICKS(sync_timeout_ms)
+        );
+
+        if ((bleStatusBits & RECORD_SYNCHRONIZED_BIT) && pending_records_count == 0) 
+        {
+            xEventGroupClearBits(xBleConnectionStatus, RECORD_SYNCHRONIZED_BIT);
+            return ESP_OK;
+        } else 
+        {
+            return ESP_ERR_TIMEOUT;
+        }
+    }
+
+    return ESP_FAIL;
 }
 
 esp_err_t ble_get_pending_records_count(uint8_t* out_pending_records_count) {
@@ -369,13 +441,11 @@ esp_err_t ble_get_pending_records_count(uint8_t* out_pending_records_count) {
     return ESP_OK;
 }
 
-esp_err_t ble_set_pending_records_count(const uint8_t num_records_pending_sync)
+esp_err_t ble_set_pending_records_count(const uint8_t num_records_pending_sync, bool need_confirm)
 {
-    pending_records_count = num_records_pending_sync;
+    esp_err_t notify_status = ESP_OK;
 
-    // esp_ble_gatts_set_attr_value()
-
-    return ESP_OK;
+    return notify_status;
 }
 
 ble_status_t ble_wait_for_state(const ble_status_t status, const bool match_exact_state, const uint32_t ms_to_wait) 
@@ -568,6 +638,7 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
     switch (event) {
         case ESP_GATTS_REG_EVT:
         {
+            gatt_profile.gatt_if = gatts_if;
             esp_err_t adv_status = esp_ble_gap_set_device_name(device_name);
             
             if (ESP_OK != adv_status) {
@@ -615,19 +686,38 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
        	    break;
                
         case ESP_GATTS_READ_EVT:
-            ESP_LOGI(TAG, "ESP_GATTS_READ_EVT");
+            handle_read_event(gatts_if, param);
        	    break;
 
         case ESP_GATTS_WRITE_EVT: 
+            if (!param->write.is_prep) {
+                ESP_LOGI(TAG, "GATT_WRITE_EVT, handle = %d, value len = %d, value :", param->write.handle, param->write.len);
 
+                uint16_t attribute_idx = get_attribute_by_hydration_handle(param->write.handle);
+
+                if (attribute_idx < HYDR_IDX_NB) {
+                    ESP_LOGI(TAG, "Hydration service WRITE");
+                    handle_hydration_svc_write_evt(attribute_idx, gatts_if, param);
+                    return;
+                }
+
+                if (param->write.need_rsp) 
+                {
+                    esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_OK, NULL);
+                }
+            } else 
+            {
+                prepare_write_event(gatts_if, &prepare_write_env, param);
+            }
             break;
-
         case ESP_GATTS_EXEC_WRITE_EVT:
-
+            ESP_LOGI(TAG, "ESP_GATTS_EXEC_WRITE_EVT");
+            exec_write_event(&prepare_write_env, param);
             break;
 
         case ESP_GATTS_MTU_EVT:
             ESP_LOGI(TAG, "ESP_GATTS_MTU_EVT, MTU %d", param->mtu.mtu);
+            gatt_mtu = param->mtu.mtu;
             break;
 
         case ESP_GATTS_CONF_EVT:
@@ -639,6 +729,9 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
             break;
 
         case ESP_GATTS_CONNECT_EVT:
+            gatt_profile.conn_id = param->connect.conn_id;
+            gatt_mtu = 23;
+
             ESP_LOGI(TAG, "ESP_GATTS_CONNECT_EVT, conn_id = %d", param->connect.conn_id);
             esp_log_buffer_hex(TAG, param->connect.remote_bda, 6);
             esp_ble_conn_update_params_t conn_params = {0};
@@ -710,4 +803,277 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
         default:
             break;
     }
+}
+
+static void prepare_write_event(esp_gatt_if_t gatts_if, prepare_type_env_t* prepare_write_env, esp_ble_gatts_cb_param_t* param)
+{
+    ESP_LOGI(TAG, "Prepare write EVT, handle = %d, value len = %d", param->write.handle, param->write.len);
+    esp_gatt_status_t status = ESP_OK;
+
+    if (prepare_write_env->buffer == NULL) 
+    {
+        prepare_write_env->buffer = (uint8_t*) malloc(PREPARE_BUF_MAX_SIZE * sizeof(uint8_t));
+        prepare_write_env->length = 0;
+
+        if (prepare_write_env->buffer == NULL) 
+        {
+            ESP_LOGE(TAG, "Gatt server prepare write no mem (%s)", __func__);
+            status = ESP_GATT_NO_RESOURCES;
+        }
+    } else 
+    {
+        if (param->write.offset > PREPARE_BUF_MAX_SIZE) 
+        {
+            status = ESP_GATT_INVALID_OFFSET;
+        } else if ((param->write.offset + param->write.len) > PREPARE_BUF_MAX_SIZE) 
+        {
+            status = ESP_GATT_INVALID_ATTR_LEN;
+        }
+    }
+    
+    if (param->write.need_rsp) 
+    {
+        esp_gatt_rsp_t* gatt_response = (esp_gatt_rsp_t*) malloc(sizeof(esp_gatt_rsp_t));
+
+        if (NULL != gatt_response) 
+        {
+            gatt_response->attr_value.len = param->write.len;
+            gatt_response->attr_value.handle = param->write.handle;
+            gatt_response->attr_value.offset = param->write.offset;
+            gatt_response->attr_value.auth_req = ESP_GATT_AUTH_REQ_NONE;
+
+            memcpy(gatt_response->attr_value.value, param->write.value, param->write.len);
+
+            esp_err_t response_status = esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, status, gatt_response);
+
+            if (ESP_OK != response_status) 
+            {
+                ESP_LOGE(TAG, "Error enviando respuesta a evento de escritura (%s)", esp_err_to_name(response_status));
+            }
+
+            free(gatt_response);
+            gatt_response = NULL;
+        } else 
+        {
+            ESP_LOGE(TAG, "Error asignando memoria a la respuesta GATT (en %s)", __func__);
+        }
+    }
+
+    if (ESP_OK == status) 
+    {
+        memcpy(
+            prepare_write_env->buffer + param->write.offset, 
+            param->write.value,
+            param->write.len
+        );
+
+        prepare_write_env->length += param->write.len;
+    }
+}
+
+static void exec_write_event(prepare_type_env_t* prepare_write_env, esp_ble_gatts_cb_param_t* param)
+{
+    if (param->exec_write.exec_write_flag == ESP_GATT_PREP_WRITE_EXEC && NULL != prepare_write_env->buffer)
+    {
+        esp_log_buffer_hex(TAG, prepare_write_env->buffer, prepare_write_env->length);
+    } else 
+    {
+        ESP_LOGI(TAG, "ESP_GATT_PREP_WRITE_CANCEL");
+    }
+
+    if (NULL != prepare_write_env->buffer) 
+    {
+        free(prepare_write_env->buffer);
+        prepare_write_env->buffer = NULL;
+    }
+
+    prepare_write_env->length = 0;
+}
+
+static void gatts_exec_read(esp_gatt_if_t gatts_if, prepare_type_env_t* prepare_read_env, esp_ble_gatts_cb_param_t* param, uint8_t *p_rsp_v, uint16_t v_len)
+{
+    if (!param->read.need_rsp) {
+        return;
+    }
+
+    uint16_t value_len = gatt_mtu - 1;
+    if ((v_len - param->read.offset) < (gatt_mtu - 1))
+    {
+        value_len = v_len - param->read.offset;
+    } else {
+        ESP_LOGI(TAG, "TODO: manejar long reads");
+    }
+
+    esp_gatt_rsp_t response;
+    memset(&response, 0, sizeof(esp_gatt_rsp_t));
+    response.attr_value.handle = param->read.handle;
+    response.attr_value.len = value_len;
+    response.attr_value.offset = param->read.offset;
+    memcpy(response.attr_value.value, &p_rsp_v[param->read.offset], value_len);
+
+    esp_err_t response_status = esp_ble_gatts_send_response(gatts_if, param->read.conn_id, param->read.trans_id, ESP_GATT_OK, &response);
+
+    if (ESP_OK == response_status) {
+        ESP_LOGI(TAG, "Respuesta enviada para evento de READ");
+    }
+}
+
+static void handle_read_event(esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t* param)
+{
+    if (!param->read.is_long)
+    {
+        int attributeIdx;
+        esp_gatt_rsp_t response;
+        response.attr_value.len = 0;
+
+        attributeIdx = get_attribute_by_hydration_handle(param->read.handle);
+
+        if (attributeIdx < HYDR_IDX_NB)
+        {
+            ESP_LOGI(TAG, "Hydration service READ, attribute index = %d", attributeIdx);
+            handle_hydration_svc_read_evt(attributeIdx, param, &response);
+        }
+
+        attributeIdx = get_attribute_by_battery_handle(param->read.handle);
+
+        if (attributeIdx < BAT_IDX_NB)
+        {
+            ESP_LOGI(TAG, "Battery service READ, attribute index = %d", attributeIdx);
+            handle_battery_svc_read_evt(attributeIdx, param, &response);
+        }
+
+        gatts_exec_read(gatts_if, &prepare_read_buf, param, response.attr_value.value, response.attr_value.len);
+    }
+}
+
+static uint16_t get_attribute_by_hydration_handle(uint16_t attribute_handle) 
+{
+    uint16_t attribute_index = HYDR_IDX_NB;
+
+    for (uint16_t index = 0; index < HYDR_IDX_NB; ++index) 
+    {
+        if (hydration_handle_table[index] == attribute_handle) 
+        {
+            attribute_index = index;
+            break;
+        }
+    }
+
+    return attribute_index;
+}
+
+static uint16_t get_attribute_by_battery_handle(uint16_t attribute_handle) 
+{
+    uint16_t attribute_index = BAT_IDX_NB;
+
+    for (uint16_t index = 0; index < BAT_IDX_NB; ++index) 
+    {
+        if (battery_handle_table[index] == attribute_handle) 
+        {
+            attribute_index = index;
+            break;
+        }
+    }
+
+    return attribute_index;
+}
+
+static void handle_hydration_svc_read_evt(uint16_t attribute_index, esp_ble_gatts_cb_param_t* param, esp_gatt_rsp_t* response)
+{
+    switch (attribute_index) 
+    {
+        case HYDR_IDX_VAL_MILILITERS:
+            memset(response->attr_value.value, 0, sizeof(response->attr_value.value));
+            memcpy(response->attr_value.value, current_record.water_amount, sizeof(current_record.water_amount));
+            response->attr_value.len = sizeof(current_record.water_amount);
+            break;
+        case HYDR_IDX_VAL_TEMP:
+            memset(response->attr_value.value, 0, sizeof(response->attr_value.value));
+            memcpy(response->attr_value.value, current_record.temperature, sizeof(current_record.temperature));
+            response->attr_value.len = sizeof(current_record.temperature);
+            break;
+        case HYDR_IDX_VAL_DATE:
+            memset(response->attr_value.value, 0, sizeof(response->attr_value.value));
+            memcpy(response->attr_value.value, current_record.timestamp, sizeof(current_record.timestamp));
+            response->attr_value.len = sizeof(current_record.timestamp);
+            break;
+        case HYDR_IDX_VAL_NUM_NEW_RECORDS:
+            memset(response->attr_value.value, 0, sizeof(response->attr_value.value));
+            memcpy(response->attr_value.value, &pending_records_count, sizeof(pending_records_count));
+            response->attr_value.len = sizeof(pending_records_count);
+            break;
+        default:
+            ESP_LOGW(TAG, "Indice de atributo no soportado para el servicio de hidratacion (%d)", attribute_index);
+            break;
+    }
+}
+
+static void handle_battery_svc_read_evt(uint16_t attribute_index, esp_ble_gatts_cb_param_t* param, esp_gatt_rsp_t* response)
+{
+    switch (attribute_index) 
+    {
+        case BAT_IDX_VAL_LEVEL:
+            memset(response->attr_value.value, 0, sizeof(response->attr_value.value));
+            memcpy(response->attr_value.value, current_record.battery_level, sizeof(current_record.battery_level));
+            response->attr_value.len = sizeof(current_record.battery_level);
+            break;
+        default:
+            ESP_LOGW(TAG, "Indice de atributo no soportado para el servicio de bateria (%d)", attribute_index);
+            break;
+    }
+}
+
+static esp_gatt_status_t handle_hydration_svc_write_evt(uint16_t attribute_index, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t* param) 
+{
+    esp_gatt_status_t status = ESP_GATT_WRITE_NOT_PERMIT;
+    size_t value_length = param->write.len;
+    uint8_t* value = param->write.value; 
+
+    switch (attribute_index) 
+    {
+        case HYDR_IDX_VAL_NUM_NEW_RECORDS:
+            if (value_length == 1) {
+                pending_records_count = value[0];
+                if (pending_records_count == 0) {
+                    status = ESP_GATT_OK;
+                    xEventGroupSetBits(xBleConnectionStatus, RECORD_SYNCHRONIZED_BIT);
+                    ESP_LOGI(TAG, "Confirmado: registro fue obtenido por dispositivo periferico");
+                }
+            }
+            break;
+        case HYDR_IDX_CHAR_NUM_NEW_RECORDS_NTF_CFG:
+            if (value_length == 2) {
+                // Configurar notificaciones para HYDR_IDX_CHAR_NUM_NEW_RECORDS.
+                uint16_t descr_value = param->write.value[1] << 8 | param->write.value[0];
+
+                if (descr_value == 0x0001) {
+                    status = ESP_GATT_OK;
+                    ESP_LOGI(TAG, "'Notify' activado para HYDR_IDX_CHAR_NUM_NEW_RECORDS_NTF_CFG");
+                    esp_ble_gatts_send_indicate(gatts_if, param->write.conn_id, 
+                        hydration_handle_table[HYDR_IDX_VAL_NUM_NEW_RECORDS], sizeof(pending_records_count), &pending_records_count, false);
+                } else if (descr_value == 0x0002) 
+                {
+                    status = ESP_GATT_OK;
+                    ESP_LOGI(TAG, "'Indicate' activado para HYDR_IDX_CHAR_NUM_NEW_RECORDS_NTF_CFG");
+
+                    esp_ble_gatts_send_indicate(gatts_if, param->write.conn_id, 
+                        hydration_handle_table[HYDR_IDX_VAL_NUM_NEW_RECORDS], sizeof(pending_records_count), &pending_records_count, true);
+                } else if (descr_value == 0x0000)
+                {
+                    status = ESP_GATT_OK;
+                    ESP_LOGI(TAG, "Notify/Indicate desactivado para HYDR_IDX_CHAR_NUM_NEW_RECORDS_NTF_CFG");
+                } else 
+                {
+                    ESP_LOGW(TAG, "Valor de descriptor desconocido");
+                    esp_log_buffer_hex(TAG, param->write.value, param->write.len);
+                }
+            }
+            break;
+        default:
+            ESP_LOGW(TAG, "Indice el atributo con indice (%d) del servicio de hidratacion no soporta escritura", attribute_index);
+            break;
+
+    }
+
+    return status;
 }

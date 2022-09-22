@@ -29,7 +29,7 @@ typedef enum {
  */ 
 esp_err_t ble_driver_init();
 
-esp_err_t ble_synchronize_hydration_record(const hydration_record_t* record);
+esp_err_t ble_synchronize_hydration_record(const hydration_record_t* record, const uint32_t sync_timeout_ms);
 
 /**
  * @brief Obtiene el valor de la característica con el número de 
@@ -40,7 +40,7 @@ esp_err_t ble_synchronize_hydration_record(const hydration_record_t* record);
  */ 
 esp_err_t ble_get_pending_records_count(uint8_t* out_pending_records_count);
 
-esp_err_t ble_set_pending_records_count(const uint8_t pending_records_count);
+esp_err_t ble_set_pending_records_count(const uint8_t pending_records_count, bool need_confirm);
 
 /**
  * @brief Esperar a que el status de la conexion BLE sea igual a status.
