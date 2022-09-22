@@ -370,7 +370,7 @@ static void record_generator_task(void* pvParameters)
     int32_t numRecordsSentForSync = 0;
     int32_t numRecordsSentForStorage = 0; 
 
-    static const TickType_t waitForReadingsTimeoutMs = pdMS_TO_TICKS(5000);
+    static const TickType_t waitForReadingsTimeoutMs = pdMS_TO_TICKS(10000);
 
     static sensor_measures_t readingsBuffer[MAX_SENSOR_DATA_BUF_LEN];
     size_t indexOfLatestSensorReadings = 0;
@@ -464,7 +464,7 @@ static void communication_task(void* pvParameters)
     static const TickType_t SYNC_FAILED_BACKOFF_DELAY = pdMS_TO_TICKS(5000);
 
     static const uint32_t waitForPairedStatusTimeoutMS = 5000;
-    static const uint32_t recordReadTimeoutMS = 5000; 
+    static const uint32_t recordReadTimeoutMS = 10 * 1000; 
 
     hydration_record_t xRecordToSync = { 0, 0, 0, 0 };
 

@@ -378,8 +378,10 @@ esp_err_t ble_synchronize_hydration_record(const hydration_record_t* record, con
         current_record.water_amount[i] = (record->water_amount >> 8 * i) & 0xFF;
     }
 
+    int16_t scaledTemperature = record->temperature * 100;
+
     for (int i = 0; i < sizeof(int16_t); ++i) {
-        current_record.temperature[i] = (record->temperature >> 8 * i) & 0xFF;
+        current_record.temperature[i] = (scaledTemperature >> 8 * i) & 0xFF;
     }
 
     current_record.battery_level[0] = (record->battery_level) & 0xFF;
@@ -698,7 +700,6 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
                 if (attribute_idx < HYDR_IDX_NB) {
                     ESP_LOGI(TAG, "Hydration service WRITE");
                     handle_hydration_svc_write_evt(attribute_idx, gatts_if, param);
-                    return;
                 }
 
                 if (param->write.need_rsp) 
