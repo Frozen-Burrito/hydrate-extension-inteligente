@@ -1,34 +1,24 @@
-#ifndef _DRIVER_BLE_H_
-#define _DRIVER_BLE_H_
+#ifndef _BLE_DRIVER_H_
+#define _BLE_DRIVER_H_
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
-#include <esp_system.h>
-#include <esp_log.h>
-#include <esp_bt.h>
+#include <esp_err.h>
 
-#include <esp_gap_ble_api.h>
-#include <esp_gatts_api.h>
-#include <esp_bt_main.h>
-#include <esp_gatt_common_api.h>
-
-
-
-
-esp_err_t ble_driver_init();
-
-esp_err_t ble_synchronize_hydration_record(const hydration_record_t* record, const uint32_t sync_timeout_ms);
+#include "hydrate_common.h"
+#include "ble_common.h"
 
 /**
- * @brief Obtiene el valor de la característica con el número de 
- * registros pendientes de sincronización.
- * 
- * Este valor puede ser modificado por el dispositivo cliente a 
- * través del perfil GATT.
+ * @brief Inicializa el driver BLE con sus perfiles GAP y GATT, para luego
+ * comenzar el advertising.
  */ 
-esp_err_t ble_get_pending_records_count(uint8_t* out_pending_records_count);
+esp_err_t ble_driver_init(void);
 
-esp_err_t ble_set_pending_records_count(const uint8_t pending_records_count, bool need_confirm);
+esp_err_t ble_driver_sleep();
+
+esp_err_t ble_driver_shutdown(void);
+
+esp_err_t ble_synchronize_hydration_record(const hydration_record_t* record, const uint32_t sync_timeout_ms);
 
 /**
  * @brief Esperar a que el status de la conexion BLE sea igual a status.
@@ -43,4 +33,4 @@ esp_err_t ble_set_pending_records_count(const uint8_t pending_records_count, boo
  */
 ble_status_t ble_wait_for_state(const ble_status_t status, const bool match_exact_state, const uint32_t ms_to_wait); 
 
-#endif // _DRIVER_BLE_H_
+#endif /* _BLE_DRIVER_H_ */
