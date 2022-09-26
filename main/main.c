@@ -18,7 +18,8 @@
 // Componentes personalizados
 #include "hydrate_common.h"
 #include "storage.h"
-#include "driver_ble.h"
+#include "ble_driver.h"
+#include "ble_common.h"
 #include "hx711.h"
 #include "battery_monitor.h"
 
@@ -469,7 +470,7 @@ static void communication_task(void* pvParameters)
     hydration_record_t xRecordToSync = { 0, 0, 0, 0 };
 
     // Intentar inicializar el driver BLE.
-    esp_err_t ble_error = ble_driver_init();
+    esp_err_t ble_error = ble_driver_init("Hydrate-0001");
 
     if (NULL == xSyncQueue || ble_error != ESP_OK)  {
         // Error fatal, terminar inmediatamente este task.

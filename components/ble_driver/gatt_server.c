@@ -1,5 +1,6 @@
 #include "gatt_server.h"
 
+#include <esp_log.h>
 #include <esp_bt.h>
 
 #include <esp_gap_ble_api.h>
@@ -7,23 +8,20 @@
 #include <esp_bt_main.h>
 #include <esp_gatt_common_api.h>
 
-#include "services/ble_service_battery.h"
-#include "services/ble_service_device_time.h"
-#include "services/ble_service_hydration.h"
-
 static const char* TAG = "GATT_SERVER";
 
-static const char device_name[16] = "Hydrate-0000";
+static const char* device_name = NULL;
 
 #define NUMBER_OF_PROFILES 1
 #define APP_PROFILE_IDX 0
 #define HYDRATE_APP_ID 0xF0
 
 #define SVC_INST_ID 0
-#define MAX_GATTS_CHAR_LEN_BYTES 500
 #define PREPARE_BUF_MAX_SIZE 1024
 
 static uint16_t gatt_mtu = 23;
+
+static EventGroupHandle_t xBleStateEventGroup = NULL;
 
 typedef struct {
     uint8_t* buffer;
@@ -36,8 +34,7 @@ static prepare_char_access_t prepare_read_buf;
 
 typedef struct {
     uint16_t conn_id;
-    esp_gatt_if_t gatt_if;
-    bool is_connected;
+    esp_gatt_if_t gatts_if;
 } gatts_profile_inst_t;
 
 static gatts_profile_inst_t profile;
@@ -68,15 +65,31 @@ static struct gatts_profile_inst hydrate_profile_tab[NUMBER_OF_PROFILES] = {
 
 static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param);
 
-static void prepare_write_event(esp_gatt_if_t gatts_if, prepare_type_env_t* prepare_write_env, esp_ble_gatts_cb_param_t* param);
-static void exec_write_event(prepare_type_env_t* prepare_write_env, esp_ble_gatts_cb_param_t* param);
+static void prepare_write_event(esp_gatt_if_t gatts_if, prepare_char_access_t* prepare_write_buf, esp_ble_gatts_cb_param_t* param);
+static void exec_write_event(prepare_char_access_t* prepare_write_buf, esp_ble_gatts_cb_param_t* param);
+static void handle_write_event(esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t* param);
 
 static void handle_read_event(esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t* param);
-static void gatts_exec_read(esp_gatt_if_t gatts_if, prepare_type_env_t* prepare_read_env, esp_ble_gatts_cb_param_t* param, uint8_t *p_rsp_v, uint16_t v_len);
+static void gatts_exec_read(esp_gatt_if_t gatts_if, prepare_char_access_t* prepare_read_env, esp_ble_gatts_cb_param_t* param, uint8_t *p_rsp_v, uint16_t v_len);
 
-esp_err_t ble_gatt_server_init()
+esp_err_t ble_gatt_server_init(const char* dev_name, EventGroupHandle_t bleStatusEventGroup)
 {
     esp_err_t status = ESP_OK;
+
+    if (ESP_OK == status) 
+    {
+        xBleStateEventGroup = bleStatusEventGroup;
+
+        if (NULL == xBleStateEventGroup) 
+        {
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+
+    if (ESP_OK == status) 
+    {
+        device_name = dev_name;
+    }
 
     if (ESP_OK == status) 
     {
@@ -130,7 +143,7 @@ esp_err_t ble_gatt_server_shutdown()
         return ESP_FAIL;
     }
 
-    status = esp_ble_gatts_app_unregister();    
+    status = esp_ble_gatts_app_unregister(profile.gatts_if);    
 
     if (ESP_OK != status) 
     {
@@ -145,7 +158,17 @@ esp_err_t ble_gatt_server_indicate(uint16_t attribute_handle, uint16_t value_len
 {
     esp_err_t status = ESP_OK;
 
-    if (profile.is_connected) 
+    EventBits_t ble_status_bits = xEventGroupWaitBits(
+        xBleStateEventGroup,
+        PAIRED_BIT,
+        pdFALSE,
+        pdTRUE,
+        (TickType_t) 0
+    );
+
+    bool is_connected = ble_status_bits & PAIRED_BIT;
+
+    if (is_connected) 
     {
         status = esp_ble_gatts_send_indicate(
             profile.gatts_if, 
@@ -157,6 +180,7 @@ esp_err_t ble_gatt_server_indicate(uint16_t attribute_handle, uint16_t value_len
         );
     } else 
     {
+        ESP_LOGW(TAG, "Se intento enviar un indicate cuando el dispositivo no estaba emparejado");
         status = ESP_FAIL;
     }
 
@@ -170,7 +194,7 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
     {
         if (param->reg.status == ESP_GATT_OK) 
         {
-            hydration_profile_tab[APP_PROFILE_IDX].gatts_if = gatts_if;
+            hydrate_profile_tab[APP_PROFILE_IDX].gatts_if = gatts_if;
 
         } else 
         {
@@ -184,11 +208,11 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
     do {
         for (int i = 0; i < NUMBER_OF_PROFILES; i++) 
         {
-            if (gatts_if == ESP_GATT_IF_NONE || gatts_if == hydration_profile_tab[i].gatts_if) 
+            if (gatts_if == ESP_GATT_IF_NONE || gatts_if == hydrate_profile_tab[i].gatts_if) 
             {
-                if (hydration_profile_tab[i].gatts_cb) 
+                if (hydrate_profile_tab[i].gatts_cb) 
                 {
-                    hydration_profile_tab[i].gatts_cb(event, gatts_if, param);
+                    hydrate_profile_tab[i].gatts_cb(event, gatts_if, param);
                 }
             }
         }
@@ -201,13 +225,13 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
     switch (event) {
         case ESP_GATTS_REG_EVT:
         {
-            gatt_profile.gatt_if = gatts_if;
-            // TODO: ble_gap_set_adv_data(device_name);
+            profile.gatts_if = gatts_if;
+            ble_gap_set_adv_data(device_name);
 
             // Crear la tabla GATT de atributos para el servicio de hidratación.
-            esp_err_t create_attr_status = esp_ble_gatts_create_attr_tab(hydration_svc_attr_table, gatts_if, HYDR_IDX_NB, INST_SVC_ID);
+            esp_err_t create_attr_status = esp_ble_gatts_create_attr_tab(hydration_svc_attr_table, gatts_if, HYDR_SVC_ATTRIBUTE_COUNT, SVC_INST_ID);
             
-            if (ESP_OK != adv_status){
+            if (ESP_OK != create_attr_status){
                 ESP_LOGE(
                     TAG, 
                     "Error al crear la tabla de atributos para el servicio de hidratacion (%s)", 
@@ -216,12 +240,23 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
             }
 
             // Crear la tabla GATT de atributos para el servicio de batería.
-            create_attr_status = esp_ble_gatts_create_attr_tab(battery_svc_attr_table, gatts_if, BAT_IDX_NB, INST_SVC_ID);
+            create_attr_status = esp_ble_gatts_create_attr_tab(battery_svc_attr_table, gatts_if, BATTERY_SVC_ATTRIBUTE_COUNT, SVC_INST_ID);
             
-            if (ESP_OK != adv_status){
+            if (ESP_OK != create_attr_status){
                 ESP_LOGE(
                     TAG, 
                     "Error al crear la tabla de atributos para el servicio de bateria (%s)", 
+                    esp_err_to_name(create_attr_status)
+                );
+            }
+
+            // Crear la tabla GATT de atributos para el servicio de device time.
+            create_attr_status = esp_ble_gatts_create_attr_tab(device_time_svc_attr_table, gatts_if, DEV_TIME_SVC_ATTRIBUTE_COUNT, SVC_INST_ID);
+            
+            if (ESP_OK != create_attr_status){
+                ESP_LOGE(
+                    TAG, 
+                    "Error al crear la tabla de atributos para el servicio de fecha del dispositivo (%s)", 
                     esp_err_to_name(create_attr_status)
                 );
             }
@@ -233,28 +268,11 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
        	    break;
 
         case ESP_GATTS_WRITE_EVT: 
-            if (!param->write.is_prep) {
-                ESP_LOGI(TAG, "GATT_WRITE_EVT, handle = %d, value len = %d, value :", param->write.handle, param->write.len);
-
-                uint16_t attribute_idx = get_attribute_by_hydration_handle(param->write.handle);
-
-                if (attribute_idx < HYDR_IDX_NB) {
-                    ESP_LOGI(TAG, "Hydration service WRITE");
-                    handle_hydration_svc_write_evt(attribute_idx, gatts_if, param);
-                }
-
-                if (param->write.need_rsp) 
-                {
-                    esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_OK, NULL);
-                }
-            } else 
-            {
-                prepare_write_event(gatts_if, &prepare_write_env, param);
-            }
+            handle_write_event(gatts_if, param);
             break;
         case ESP_GATTS_EXEC_WRITE_EVT:
             ESP_LOGI(TAG, "ESP_GATTS_EXEC_WRITE_EVT");
-            exec_write_event(&prepare_write_env, param);
+            exec_write_event(&prepare_write_buf, param);
             break;
 
         case ESP_GATTS_MTU_EVT:
@@ -271,7 +289,7 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
             break;
 
         case ESP_GATTS_CONNECT_EVT:
-            gatt_profile.conn_id = param->connect.conn_id;
+            profile.conn_id = param->connect.conn_id;
             gatt_mtu = 23;
 
             ESP_LOGI(TAG, "ESP_GATTS_CONNECT_EVT, conn_id = %d", param->connect.conn_id);
@@ -287,45 +305,92 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
             //Enviar los parámetros de conección actualizados al dispositivo emparejado.
             esp_ble_gap_update_conn_params(&conn_params);
 
-            xEventGroupClearBits(xBleConnectionStatus, ALL_BITS);
-            xEventGroupSetBits(xBleConnectionStatus, PAIRED_BIT);
+            xEventGroupClearBits(xBleStateEventGroup, ALL_BITS);
+            xEventGroupSetBits(xBleStateEventGroup, PAIRED_BIT);
             break;
 
         case ESP_GATTS_DISCONNECT_EVT:
-            xEventGroupClearBits(xBleConnectionStatus, ALL_BITS);
-            xEventGroupSetBits(xBleConnectionStatus, INACTIVE_BIT);
+            xEventGroupClearBits(xBleStateEventGroup, ALL_BITS);
+            xEventGroupSetBits(xBleStateEventGroup, INACTIVE_BIT);
 
             ESP_LOGI(TAG, "ESP_GATTS_DISCONNECT_EVT, reason = %#X", param->disconnect.reason);
-            esp_ble_gap_start_advertising(&advertise_params);
+            ble_gap_start_adv();
             break;
 
         case ESP_GATTS_CREAT_ATTR_TAB_EVT:
         {
             if (ESP_GATT_OK == param->add_attr_tab.status)
             {
-                switch (param->add_attr_tab.num_handle) 
+                ESP_LOGI(TAG, "Attribute table created for service with UUID len = %d", param->add_attr_tab.svc_uuid.len);
+                switch (param->add_attr_tab.svc_uuid.len) 
                 {
-                case HYDR_IDX_NB:
-                    ESP_LOGI(TAG, "Tabla GATT para HYDR_SVC creada, handle = %d", param->add_attr_tab.num_handle);
-                    memcpy(hydration_handle_table, param->add_attr_tab.handles, sizeof(hydration_handle_table));
-                    esp_ble_gatts_start_service(hydration_handle_table[HYDRATION_SVC_IDX]);
+                case ESP_UUID_LEN_16:
+                    // Manejar CREATE_ATTR_TABLE para servicios con UUID de longitud 16 bits.
+                    if (battery_service_uuid == param->add_attr_tab.svc_uuid.uuid.uuid16)
+                    {
+                        if (param->add_attr_tab.num_handle == BATTERY_SVC_ATTRIBUTE_COUNT) 
+                        {
+                            ESP_LOGI(TAG, "Tabla GATT para BAT_SVC creada, handle = %d", param->add_attr_tab.num_handle);
+                            memcpy(battery_handle_table, param->add_attr_tab.handles, sizeof(battery_handle_table));
+                            esp_ble_gatts_start_service(battery_handle_table[BATTERY_SVC_IDX]);
+                        } else 
+                        {
+                            ESP_LOGE(
+                                TAG, 
+                                "Tabla de atributos anormal creada para BAT_SVC, el numero de handles (%d) no es igual al numero de atributos declarado (%d)", 
+                                param->add_attr_tab.num_handle, 
+                                BATTERY_SVC_ATTRIBUTE_COUNT
+                            );
+                        }
+                    } else if (device_time_service_uuid == param->add_attr_tab.svc_uuid.uuid.uuid16)
+                    {
+                        if (param->add_attr_tab.num_handle == DEV_TIME_SVC_ATTRIBUTE_COUNT) 
+                        {
+                            ESP_LOGI(TAG, "Tabla GATT para DEVICE_TIME_SVC creada, handle = %d", param->add_attr_tab.num_handle);
+                            memcpy(device_time_handle_table, param->add_attr_tab.handles, sizeof(device_time_handle_table));
+                            esp_ble_gatts_start_service(device_time_handle_table[DEV_TIME_IDX]);
+                        } else 
+                        {
+                            ESP_LOGE(
+                                TAG, 
+                                "Tabla de atributos anormal creada para DEVICE_TIME_SVC, el numero de handles (%d) no es igual al numero de atributos declarado (%d)", 
+                                param->add_attr_tab.num_handle, 
+                                DEV_TIME_SVC_ATTRIBUTE_COUNT
+                            );
+                        }
+                    } else 
+                    {
+                        ESP_LOGE(TAG, "ESP_GATTS_CREAT_ATTR_TAB_EVT service not found for UUID = %d", param->add_attr_tab.svc_uuid.uuid.uuid16);
+                    }
                     break;
-                case BAT_IDX_NB:
-                    ESP_LOGI(TAG, "Tabla GATT para BAT_SVC creada, handle = %d", param->add_attr_tab.num_handle);
-                    memcpy(battery_handle_table, param->add_attr_tab.handles, sizeof(battery_handle_table));
-                    esp_ble_gatts_start_service(battery_handle_table[BATTERY_SVC_IDX]);
+                case ESP_UUID_LEN_32:
+                    ESP_LOGW(TAG, "ESP_GATTS_CREAT_ATTR_TAB_EVT UUID len was 32 bits, but no service uses this length");
                     break;
-                default: 
-                    // num_handle no coincide con ninguno de los servicios. Esto es 
-                    // un problema.
-                    ESP_LOGW(
-                        TAG, 
-                        "Tabla de atributos GATT creada anormalmente, num_handle (%d) \
-                        deberia ser igual a %d (servicio de hidratacion) o a %d (servicio de bateria), pero no lo es", 
-                        param->add_attr_tab.num_handle, 
-                        HYDR_IDX_NB,
-                        BAT_IDX_NB
-                    );
+                case ESP_UUID_LEN_128:
+                    // Manejar CREATE_ATTR_TABLE para servicios con UUID de longitud 16 bits.
+                    if (uuid128_equals(param->add_attr_tab.svc_uuid.uuid.uuid128, hydration_service_uuid))
+                    {
+                        if (param->add_attr_tab.num_handle == HYDR_SVC_ATTRIBUTE_COUNT) 
+                        {
+                            ESP_LOGI(TAG, "Tabla GATT para HYDR_SVC creada, handle = %d", param->add_attr_tab.num_handle);
+                            memcpy(hydration_handle_table, param->add_attr_tab.handles, sizeof(hydration_handle_table));
+                            esp_ble_gatts_start_service(hydration_handle_table[HYDRATION_SVC_IDX]);
+
+                            hydration_svc_set_ble_state_events(xBleStateEventGroup);
+                        } else 
+                        {
+                            ESP_LOGE(
+                                TAG, 
+                                "Tabla de atributos anormal creada para HYDR_SVC, el numero de handles (%d) no es igual al numero de atributos declarado (%d)", 
+                                param->add_attr_tab.num_handle, 
+                                HYDR_SVC_ATTRIBUTE_COUNT
+                            );
+                        }
+                    } else 
+                    {
+                        ESP_LOGE(TAG, "ESP_GATTS_CREAT_ATTR_TAB_EVT service not found for 128 bit UUID");
+                        ESP_LOG_BUFFER_HEX(TAG, param->add_attr_tab.svc_uuid.uuid.uuid128, ESP_UUID_LEN_128);
+                    }
                     break;
                 }
             } else 
@@ -347,10 +412,10 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
     }
 }
 
-static void prepare_write_event(esp_gatt_if_t gatts_if, prepare_type_env_t* prepare_write_env, esp_ble_gatts_cb_param_t* param)
+static void prepare_write_event(esp_gatt_if_t gatts_if, prepare_char_access_t* prepare_write_env, esp_ble_gatts_cb_param_t* param)
 {
-    ESP_LOGI(TAG, "Prepare write EVT, handle = %d, value len = %d", param->write.handle, param->write.len);
     esp_gatt_status_t status = ESP_OK;
+    ESP_LOGI(TAG, "Prepare write EVT, handle = %d, value len = %d", param->write.handle, param->write.len);
 
     if (prepare_write_env->buffer == NULL) 
     {
@@ -413,7 +478,7 @@ static void prepare_write_event(esp_gatt_if_t gatts_if, prepare_type_env_t* prep
     }
 }
 
-static void exec_write_event(prepare_type_env_t* prepare_write_env, esp_ble_gatts_cb_param_t* param)
+static void exec_write_event(prepare_char_access_t* prepare_write_env, esp_ble_gatts_cb_param_t* param)
 {
     if (param->exec_write.exec_write_flag == ESP_GATT_PREP_WRITE_EXEC && NULL != prepare_write_env->buffer)
     {
@@ -432,7 +497,7 @@ static void exec_write_event(prepare_type_env_t* prepare_write_env, esp_ble_gatt
     prepare_write_env->length = 0;
 }
 
-static void gatts_exec_read(esp_gatt_if_t gatts_if, prepare_type_env_t* prepare_read_env, esp_ble_gatts_cb_param_t* param, uint8_t *p_rsp_v, uint16_t v_len)
+static void gatts_exec_read(esp_gatt_if_t gatts_if, prepare_char_access_t* prepare_read_env, esp_ble_gatts_cb_param_t* param, uint8_t *p_rsp_v, uint16_t v_len)
 {
     if (!param->read.need_rsp) {
         return;
@@ -460,6 +525,38 @@ static void gatts_exec_read(esp_gatt_if_t gatts_if, prepare_type_env_t* prepare_
     }
 }
 
+static void handle_write_event(esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t* param)
+{
+    if (!param->write.is_prep) {
+        ESP_LOGI(TAG, "GATT_WRITE_EVT, handle = %d, value len = %d, value :", param->write.handle, param->write.len);
+
+        // Manejar eventos de WRITE para el servicio de hidratacion.
+        uint16_t attribute_idx = get_attribute_by_hydration_handle(param->write.handle);
+
+        if (attribute_idx < HYDR_SVC_ATTRIBUTE_COUNT) {
+            ESP_LOGI(TAG, "Hydration service WRITE");
+            handle_hydration_svc_write_evt(attribute_idx, gatts_if, param);
+        }
+
+        // Manejar eventos de WRITE para el servicio de device time. 
+        attribute_idx = get_attribute_by_dev_time_handle(param->write.handle);
+
+        if (attribute_idx < DEV_TIME_SVC_ATTRIBUTE_COUNT) {
+            ESP_LOGI(TAG, "Device Time service WRITE");
+            handle_device_time_svc_write_evt(attribute_idx, gatts_if, param);
+        }
+
+        if (param->write.need_rsp) 
+        {
+            esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_OK, NULL);
+        }
+    } else 
+    {
+        prepare_write_buf.handle = param->write.handle;
+        prepare_write_event(gatts_if, &prepare_write_buf, param);
+    }
+}
+
 static void handle_read_event(esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t* param)
 {
     if (!param->read.is_long)
@@ -470,7 +567,7 @@ static void handle_read_event(esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t* 
 
         attributeIdx = get_attribute_by_hydration_handle(param->read.handle);
 
-        if (attributeIdx < HYDR_IDX_NB)
+        if (attributeIdx < HYDR_SVC_ATTRIBUTE_COUNT)
         {
             ESP_LOGI(TAG, "Hydration service READ, attribute index = %d", attributeIdx);
             handle_hydration_svc_read_evt(attributeIdx, param, &response);
@@ -478,14 +575,20 @@ static void handle_read_event(esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t* 
 
         attributeIdx = get_attribute_by_battery_handle(param->read.handle);
 
-        if (attributeIdx < BAT_IDX_NB)
+        if (attributeIdx < BATTERY_SVC_ATTRIBUTE_COUNT)
         {
             ESP_LOGI(TAG, "Battery service READ, attribute index = %d", attributeIdx);
             handle_battery_svc_read_evt(attributeIdx, param, &response);
         }
 
+        attributeIdx = get_attribute_by_dev_time_handle(param->read.handle);
+
+        if (attributeIdx < DEV_TIME_SVC_ATTRIBUTE_COUNT)
+        {
+            ESP_LOGI(TAG, "Device time READ, attribute index = %d", attributeIdx);
+            handle_device_time_svc_read_evt(attributeIdx, param, &response);
+        }
+
         gatts_exec_read(gatts_if, &prepare_read_buf, param, response.attr_value.value, response.attr_value.len);
     }
 }
-
-#endif /* _GATT_SERVER_H_ */

@@ -11,9 +11,12 @@
 #include <esp_bt_main.h>
 #include <esp_gatt_common_api.h>
 
-#include "services/ble_service_hydration.h"
-
 static const char* TAG = "BLE_GAP";
+
+static EventGroupHandle_t xBleStateEvents = NULL;
+
+const uint16_t ADV_CONFIG_FLAG = (1 << 0);
+const uint16_t SCAN_RESPONSE_CONFIG_FLAG = (1 << 1);
 
 /* Conversion: N * 1.25 ms. Range: 0x0006 (7.5 ms) to 0x0C80 (400ms)*/
 #define ADV_INT_MIN 80   /* 100 ms */
@@ -21,7 +24,9 @@ static const char* TAG = "BLE_GAP";
 
 static uint8_t adv_config_done = 0x00;
 
-static uint8_t* advertised_svc_uuid = hydration_service_uuid;
+static uint8_t advertised_svc_uuid[ESP_UUID_LEN_128] = {
+    0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0xf5, 0x19, 0x00, 0x00,
+};
 
 static esp_ble_adv_params_t advertise_params = {
     .adv_int_min = ADV_INT_MIN,
@@ -64,76 +69,18 @@ static esp_ble_adv_data_t scan_response_data = {
     .flag = (ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT),
 };
 
-static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param)
-{
-    switch (event)
-    {
-        case ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT:
+static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param);
 
-            adv_config_done &= (~ADV_CONFIG_FLAG);
-
-            if (adv_config_done == 0) {
-                esp_ble_gap_start_advertising(&advertise_params);
-            }
-
-            break;
-        case ESP_GAP_BLE_SCAN_RSP_DATA_SET_COMPLETE_EVT:
-
-            adv_config_done &= (~SCAN_RESPONSE_CONFIG_FLAG);
-
-            if (adv_config_done == 0) {
-                esp_ble_gap_start_advertising(&advertise_params);
-            }
-
-            break;
-        case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
-            // Revisar si el advertising comenzó con éxito.
-            if (ESP_BT_STATUS_SUCCESS != param->adv_start_cmpl.status)
-            {
-                ESP_LOGE(TAG, "No se pudo comenzar el advertising");
-            } else 
-            {
-                // xEventGroupClearBits(xBleConnectionStatus, ALL_BITS);
-                // xEventGroupSetBits(xBleConnectionStatus, ADVERTISING_BIT);
-                ESP_LOGI(TAG, "Advertising comenzado");
-            }
-            break;
-        case ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT:
-            // Revisar si el advertising fue detenido exitosamente.
-            if (ESP_BT_STATUS_SUCCESS != param->adv_stop_cmpl.status)
-            {
-                ESP_LOGE(TAG, "Error deteniendo el advertising");
-            } else 
-            {
-                // xEventGroupClearBits(xBleConnectionStatus, ALL_BITS);
-                // xEventGroupSetBits(xBleConnectionStatus, INACTIVE_BIT);
-                ESP_LOGI(TAG, "Advertising detenido");
-            }
-            break;
-        case ESP_GAP_BLE_UPDATE_CONN_PARAMS_EVT:
-            ESP_LOGI(
-                TAG, 
-                "Parámetros de conexión actualizados:\nstatus = %d\nmin_int = %d\nmax_int = %d\nconn_int = %d\nlatency = %d\ntimeout = %d",
-                param->update_conn_params.status,
-                param->update_conn_params.min_int,
-                param->update_conn_params.max_int,
-                param->update_conn_params.conn_int,
-                param->update_conn_params.latency,
-                param->update_conn_params.timeout
-            );
-
-            // xEventGroupClearBits(xBleConnectionStatus, ALL_BITS);
-            // xEventGroupSetBits(xBleConnectionStatus, PAIRED_BIT);
-            break;
-        
-        default:
-            break;
-    }
-}
-
-esp_err_t ble_gap_init(void)
+esp_err_t ble_gap_init(EventGroupHandle_t xBleStateEventGroup)
 {
     esp_err_t status = ESP_OK;
+
+    xBleStateEvents = xBleStateEventGroup; 
+
+    if (NULL == xBleStateEvents) 
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
 
     status = esp_ble_gap_register_callback(gap_event_handler);
 
@@ -153,6 +100,11 @@ esp_err_t ble_gap_init(void)
 esp_err_t ble_gap_set_adv_data(const char* device_name)
 {
     esp_err_t status = ESP_OK;
+
+    if (NULL == device_name)
+    {
+        device_name = CONFIG_BLE_DEVICE_NAME;
+    }
 
     status = esp_ble_gap_set_device_name(device_name);
             
@@ -188,7 +140,7 @@ esp_err_t ble_gap_start_adv(void)
 {
     esp_err_t status = ESP_OK;
 
-    status = esp_ble_gap_start_advertising();
+    status = esp_ble_gap_start_advertising(&advertise_params);
 
     return status;
 }
@@ -200,4 +152,71 @@ esp_err_t ble_gap_shutdown(void)
     status = esp_ble_gap_stop_advertising();
 
     return status;
+}
+
+static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param)
+{
+    switch (event)
+    {
+        case ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT:
+
+            adv_config_done &= (~ADV_CONFIG_FLAG);
+
+            if (adv_config_done == 0) {
+                esp_ble_gap_start_advertising(&advertise_params);
+            }
+
+            break;
+        case ESP_GAP_BLE_SCAN_RSP_DATA_SET_COMPLETE_EVT:
+
+            adv_config_done &= (~SCAN_RESPONSE_CONFIG_FLAG);
+
+            if (adv_config_done == 0) {
+                esp_ble_gap_start_advertising(&advertise_params);
+            }
+
+            break;
+        case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
+            // Revisar si el advertising comenzó con éxito.
+            if (ESP_BT_STATUS_SUCCESS != param->adv_start_cmpl.status)
+            {
+                ESP_LOGE(TAG, "No se pudo comenzar el advertising");
+            } else 
+            {
+                xEventGroupClearBits(xBleStateEvents, ALL_BITS);
+                xEventGroupSetBits(xBleStateEvents, ADVERTISING_BIT);
+                ESP_LOGI(TAG, "Advertising comenzado");
+            }
+            break;
+        case ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT:
+            // Revisar si el advertising fue detenido exitosamente.
+            if (ESP_BT_STATUS_SUCCESS != param->adv_stop_cmpl.status)
+            {
+                ESP_LOGE(TAG, "Error deteniendo el advertising");
+            } else 
+            {
+                xEventGroupClearBits(xBleStateEvents, ALL_BITS);
+                xEventGroupSetBits(xBleStateEvents, INACTIVE_BIT);
+                ESP_LOGI(TAG, "Advertising detenido");
+            }
+            break;
+        case ESP_GAP_BLE_UPDATE_CONN_PARAMS_EVT:
+            ESP_LOGI(
+                TAG, 
+                "Parámetros de conexión actualizados:\nstatus = %d\nmin_int = %d\nmax_int = %d\nconn_int = %d\nlatency = %d\ntimeout = %d",
+                param->update_conn_params.status,
+                param->update_conn_params.min_int,
+                param->update_conn_params.max_int,
+                param->update_conn_params.conn_int,
+                param->update_conn_params.latency,
+                param->update_conn_params.timeout
+            );
+
+            xEventGroupClearBits(xBleStateEvents, ALL_BITS);
+            xEventGroupSetBits(xBleStateEvents, PAIRED_BIT);
+            break;
+        
+        default:
+            break;
+    }
 }

@@ -1,27 +1,10 @@
-#ifndef _BLE_COMMON_H_
-#define _BLE_COMMON_H_
-
-#include <freertos/FreeRTOS.h>
-#include <freertos/event_groups.h>
-#include <esp_gatts_api.h>
-
-#define CHAR_DECLARATION_SIZE (sizeof(uint8_t))
-
-typedef enum {
-    UNKNOWN,
-    INACTIVE,
-    INITIALIZING,
-    ADVERTISING,
-    PAIRING,
-    PAIRED,
-    SHUTTING_DOWN,
-} ble_status_t;
+#include "ble_common.h"
 
 const uint16_t primary_service_uuid        = ESP_GATT_UUID_PRI_SERVICE;
 const uint16_t secondary_service_uuid      = ESP_GATT_UUID_SEC_SERVICE;
 const uint16_t char_client_config_uuid     = ESP_GATT_UUID_CHAR_CLIENT_CONFIG;
 const uint16_t char_declare_uuid           = ESP_GATT_UUID_CHAR_DECLARE;
-const uint16_t char_description            = ESP_GATT_UUID_CHAR_DESCRIPTION;
+const uint16_t char_descriptor_uuid        = ESP_GATT_UUID_CHAR_DESCRIPTION;
 
 const uint8_t char_property_read              = ESP_GATT_CHAR_PROP_BIT_READ;
 const uint8_t char_property_write             = ESP_GATT_CHAR_PROP_BIT_WRITE;
@@ -44,4 +27,19 @@ const EventBits_t ALL_BITS = (
     RECORD_SYNCHRONIZED_BIT | SHUTTING_DOWN_BIT
 );
 
-#endif /* _BLE_COMMON_H_ */
+const uint16_t INDICATE_NOTIFY_DISABLED = 0x0000;
+const uint16_t NOTIFY_ENABLED = 0x0001;
+const uint16_t INDICATE_ENABLED = 0x0002;
+
+bool uuid128_equals(const uint8_t first_uuid[], const uint8_t second_uuid[]) 
+{
+    for (size_t i = 0; i < ESP_UUID_LEN_128; ++i) 
+    {
+        if (first_uuid[i] != second_uuid[i])
+        {
+            return false;
+        }
+    }
+
+    return true;
+}

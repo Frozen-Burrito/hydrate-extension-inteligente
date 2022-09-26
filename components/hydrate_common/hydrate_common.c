@@ -24,7 +24,7 @@ hydration_record_t create_random_record(void) {
     int16_t rand_temperature = random_next_int(max_temperature, min_temperature);
     uint8_t rand_battery_lvl = random_next_int(max_battery_level, min_battery_level);
 
-    int32_t now = (int64_t) time(NULL);
+    int64_t now = (int64_t) time(NULL);
 
     hydration_record_t randomRecord = { 
         .water_amount = rand_water_amount, 

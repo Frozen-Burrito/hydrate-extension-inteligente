@@ -1,24 +1,20 @@
 #include "ble_driver.h"
 
-#include "ble_gap.h"
-#include "gatt_server.h"
-
 static const char* TAG = "BLE_DRIVER";
 
-typedef struct {
-    uint8_t water_amount[sizeof(uint16_t)];
-    uint8_t temperature[sizeof(int16_t)];
-    uint8_t battery_level[sizeof(uint8_t)];
-    uint8_t timestamp[sizeof(int64_t)];
-} record_buffer_t;
-
-static record_buffer_t current_record = {};
-
-static EventGroupHandle_t xBleConnectionStatus = NULL;
+static EventGroupHandle_t xBleStateEvents = NULL;
 
 static uint8_t is_record_available = 0;
 
-esp_err_t ble_driver_init(void)
+static EventBits_t ble_status_to_event_bits(const ble_status_t status);
+
+static ble_status_t event_bits_to_status(const EventBits_t bits);
+
+static const char* ble_status_to_string(const ble_status_t status);
+
+// static void substr(char* dest, char* sub, size_t start, size_t len);
+
+esp_err_t ble_driver_init(const char* device_name)
 {
     esp_err_t status = ESP_OK;
 
@@ -28,17 +24,17 @@ esp_err_t ble_driver_init(void)
 
     if (ESP_OK == status) 
     {
-        xBleConnectionStatus = xEventGroupCreate();
+        xBleStateEvents = xEventGroupCreate();
 
-        if (NULL == xBleConnectionStatus)
+        if (NULL == xBleStateEvents)
         {
             status = ESP_ERR_NO_MEM;
             ESP_LOGE(TAG, "El grupo de eventos para el estado de BLE no pudo ser creado. Asegura que haya memoria disponible en heap.");
             return status;
         }
 
-        xEventGroupClearBits(xBleConnectionStatus, ALL_BITS);
-        xEventGroupSetBits(xBleConnectionStatus, INITIALIZING_BIT);
+        xEventGroupClearBits(xBleStateEvents, ALL_BITS);
+        xEventGroupSetBits(xBleStateEvents, INITIALIZING_BIT);
     }
     
     if (ESP_OK == status) 
@@ -85,12 +81,12 @@ esp_err_t ble_driver_init(void)
 
     if (ESP_OK == status) 
     {
-        status = ble_gap_init();
+        status = ble_gap_init(xBleStateEvents);
     }
 
     if (ESP_OK == status) 
     {
-        status = ble_gatt_server_init();
+        status = ble_gatt_server_init(device_name, xBleStateEvents);
     }
 
     if (ESP_OK == status) 
@@ -104,27 +100,34 @@ esp_err_t ble_driver_init(void)
 esp_err_t ble_driver_sleep()
 {
     esp_err_t status = ESP_OK;
+
+    if (ESP_OK == status) 
+    {
+        status = esp_bt_sleep_enable();
+    }
+
+    return status;
 }
 
 esp_err_t ble_driver_shutdown(void)
 {
     esp_err_t status = ESP_OK;
 
-    if (NULL != xBleConnectionStatus)
+    if (NULL != xBleStateEvents)
     {
         // Notificar que BLE está siendo desactivado.
-        xEventGroupClearBits(xBleConnectionStatus, ALL_BITS);
-        xEventGroupSetBits(xBleConnectionStatus, SHUTTING_DOWN_BIT);
+        xEventGroupClearBits(xBleStateEvents, ALL_BITS);
+        xEventGroupSetBits(xBleStateEvents, SHUTTING_DOWN_BIT);
     }
 
-    status = ble_gatt_server_shutdown(void);
+    status = ble_gatt_server_shutdown();
 
     if (ESP_OK != status) 
     {
         return status;
     }
 
-    status = ble_gap_shutdown(void);
+    status = ble_gap_shutdown();
 
     if (ESP_OK != status) 
     {
@@ -171,25 +174,24 @@ esp_err_t ble_driver_shutdown(void)
         return status;
     }
 
+    xEventGroupClearBits(xBleStateEvents, ALL_BITS);
+    xEventGroupSetBits(xBleStateEvents, INACTIVE_BIT);
+
     return ESP_OK;
 }
 
 esp_err_t ble_synchronize_hydration_record(const hydration_record_t* record, const uint32_t sync_timeout_ms)
 {
-    for (int i = 0; i < sizeof(uint16_t); ++i) {
-        current_record.water_amount[i] = (record->water_amount >> 8 * i) & 0xFF;
+    esp_err_t status = ESP_OK;
+
+    if (ESP_OK == status) 
+    {
+        status = hydration_svc_set_value(record);
     }
 
-    int16_t scaledTemperature = record->temperature * 100;
-
-    for (int i = 0; i < sizeof(int16_t); ++i) {
-        current_record.temperature[i] = (scaledTemperature >> 8 * i) & 0xFF;
-    }
-
-    current_record.battery_level[0] = (record->battery_level) & 0xFF;
-
-    for (int i = 0; i < sizeof(int64_t); ++i) {
-        current_record.timestamp[i] = (record->timestamp >> 8 * i) & 0xFF;
+    if (ESP_OK == status) 
+    {
+        status = battery_svc_set_value(record->battery_level);
     }
 
     ESP_LOGI(
@@ -197,20 +199,12 @@ esp_err_t ble_synchronize_hydration_record(const hydration_record_t* record, con
         "Registro convertido a buffers para ser sincronizado (water_amount, temperature, battery_level, timestamp):"
     );
 
-    ESP_LOG_BUFFER_HEX(TAG, current_record.water_amount, sizeof(current_record.water_amount));
-    ESP_LOG_BUFFER_HEX(TAG, current_record.temperature, sizeof(current_record.temperature));
-    ESP_LOG_BUFFER_HEX(TAG, current_record.battery_level, sizeof(current_record.battery_level));
-    ESP_LOG_BUFFER_HEX(TAG, current_record.timestamp, sizeof(current_record.timestamp));
+    xEventGroupClearBits(xBleStateEvents, RECORD_SYNCHRONIZED_BIT);
 
-    xEventGroupClearBits(xBleConnectionStatus, RECORD_SYNCHRONIZED_BIT);
+    is_record_available = 0x01;
 
-    is_record_available = 1;
-
-    //TODO: usar gatt_server
-    esp_err_t notify_status = esp_ble_gatts_send_indicate(
-        gatt_profile.gatt_if,
-        gatt_profile.conn_id,
-        hydration_handle_table[HYDR_IDX_VAL_NUM_NEW_RECORDS],
+    esp_err_t notify_status = ble_gatt_server_indicate(
+        hydration_handle_table[HYDR_IDX_HAS_NEW_RECORDS_VAL],
         sizeof(is_record_available),
         &is_record_available,
         false
@@ -220,16 +214,16 @@ esp_err_t ble_synchronize_hydration_record(const hydration_record_t* record, con
     {
         // Esperar a recibir un WRITE_EVT en is_record_available, o a timeout.
         EventBits_t bleStatusBits = xEventGroupWaitBits(
-            xBleConnectionStatus,
+            xBleStateEvents,
             RECORD_SYNCHRONIZED_BIT,
             pdFALSE,
             pdTRUE,
             pdMS_TO_TICKS(sync_timeout_ms)
         );
 
-        if ((bleStatusBits & RECORD_SYNCHRONIZED_BIT) && is_record_available == 0) 
+        if (bleStatusBits & RECORD_SYNCHRONIZED_BIT) 
         {
-            xEventGroupClearBits(xBleConnectionStatus, RECORD_SYNCHRONIZED_BIT);
+            xEventGroupClearBits(xBleStateEvents, RECORD_SYNCHRONIZED_BIT);
             return ESP_OK;
         } else 
         {
@@ -248,14 +242,14 @@ ble_status_t ble_wait_for_state(const ble_status_t status, const bool match_exac
     // Esperar a que los bits tengan el valor esperado, o el tiempo
     // de bloqueo haga timeout.
     EventBits_t resultBits = xEventGroupWaitBits(
-        xBleConnectionStatus,
+        xBleStateEvents,
         bitsToWaitFor,
         pdFALSE,
         match_exact_state,
         pdMS_TO_TICKS(ms_to_wait)
     );
 
-    ESP_LOGD(TAG, "Bits de xBleConnectionStatus: %#X", resultBits);
+    ESP_LOGD(TAG, "Bits de xBleStateEvents: %#X", resultBits);
 
     ble_status_t result_status = event_bits_to_status(resultBits);
 
@@ -271,7 +265,7 @@ static EventBits_t ble_status_to_event_bits(const ble_status_t status)
 
     switch (status) {
         case INACTIVE:
-            bits |= INACTIVE;
+            bits |= INACTIVE_BIT;
             break;
         case INITIALIZING:
             bits |= INITIALIZING_BIT;
@@ -284,6 +278,9 @@ static EventBits_t ble_status_to_event_bits(const ble_status_t status)
             break;
         case PAIRED:    
             bits |= PAIRED_BIT;
+            break;
+        case SHUTTING_DOWN:    
+            bits |= SHUTTING_DOWN_BIT;
             break;
         case UNKNOWN:
             bits = 0;
@@ -301,6 +298,7 @@ static const char* ble_status_to_string(const ble_status_t status)
         case ADVERTISING: return "Advertising";
         case PAIRING: return "Pairing";
         case PAIRED: return "Paired";
+        case SHUTTING_DOWN: return "Shutting down";
         case UNKNOWN: return "Unknown";
     }
 
@@ -311,7 +309,7 @@ static ble_status_t event_bits_to_status(const EventBits_t bits)
 {
     ble_status_t status = UNKNOWN;
 
-    if (bits & INACTIVE) {
+    if (bits & INACTIVE_BIT) {
         status = INACTIVE;
     } else if (bits & INITIALIZING_BIT) {
         status = INITIALIZING;
@@ -321,7 +319,15 @@ static ble_status_t event_bits_to_status(const EventBits_t bits)
         status = PAIRING;
     } else if (bits & PAIRED_BIT) {
         status = PAIRED;
+    } else if (bits & SHUTTING_DOWN_BIT) {
+        status = SHUTTING_DOWN;
     } 
 
     return status;
 }
+
+// static void substr(char* dest, char* sub, size_t start, size_t len) 
+// {
+//     memcpy(dest, &sub[start], len);
+//     dest[len] = '\0';
+// }

@@ -4,15 +4,25 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
 #include <esp_err.h>
+#include <esp_log.h>
+#include <esp_bt.h>
+#include <esp_bt_main.h>
 
 #include "hydrate_common.h"
 #include "ble_common.h"
+
+#include "ble_gap.h"
+#include "gatt_server.h"
+
+#include "ble_service_battery.h"
+#include "ble_service_device_time.h"
+#include "ble_service_hydration.h"
 
 /**
  * @brief Inicializa el driver BLE con sus perfiles GAP y GATT, para luego
  * comenzar el advertising.
  */ 
-esp_err_t ble_driver_init(void);
+esp_err_t ble_driver_init(const char* device_name);
 
 esp_err_t ble_driver_sleep();
 

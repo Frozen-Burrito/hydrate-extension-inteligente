@@ -138,6 +138,12 @@ CONFIG_BATTERY_INPUT_GPIO=35
 # end of Battery monitor
 
 #
+# BLE Device Configuration
+#
+CONFIG_BLE_DEVICE_NAME="Hydrate-0000"
+# end of BLE Device Configuration
+
+#
 # Sensor and measurement configuration
 #
 CONFIG_HX711_PD_SCK_GPIO=18
