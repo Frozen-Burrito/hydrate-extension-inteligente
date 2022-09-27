@@ -480,9 +480,36 @@ static void prepare_write_event(esp_gatt_if_t gatts_if, prepare_char_access_t* p
 
 static void exec_write_event(prepare_char_access_t* prepare_write_env, esp_ble_gatts_cb_param_t* param)
 {
-    if (param->exec_write.exec_write_flag == ESP_GATT_PREP_WRITE_EXEC && NULL != prepare_write_env->buffer)
+    esp_gatt_status_t status = ESP_GATT_OK;
+    // uint16_t attribute_idx;
+
+    if (param->exec_write.exec_write_flag == ESP_GATT_PREP_WRITE_EXEC)
     {
-        esp_log_buffer_hex(TAG, prepare_write_env->buffer, prepare_write_env->length);
+        uint16_t value_len = 0;
+        const uint8_t* value;
+
+        if (NULL != prepare_write_env->buffer) 
+        {
+            esp_err_t get_attr_status = esp_ble_gatts_get_attr_value(param->write.handle, &value_len, &value);
+
+            if (ESP_OK != get_attr_status) 
+            {
+                ESP_LOGE(TAG, "Exec write event error (%s)", esp_err_to_name(get_attr_status));
+            }
+        } else 
+        {
+            value = prepare_write_env->buffer;
+            value_len = prepare_write_env->length;
+        }
+
+        // Manejar eventos de WRITE para el servicio de device time. 
+        // attribute_idx = get_attribute_by_dev_time_handle(param->write.handle);
+
+        // if (attribute_idx < DEV_TIME_SVC_ATTRIBUTE_COUNT) {
+        //     ESP_LOGI(TAG, "Device Time service WRITE");
+        //     handle_device_time_svc_write_evt(attribute_idx, gatts_if, param);
+        // }
+
     } else 
     {
         ESP_LOGI(TAG, "ESP_GATT_PREP_WRITE_CANCEL");
@@ -495,6 +522,8 @@ static void exec_write_event(prepare_char_access_t* prepare_write_env, esp_ble_g
     }
 
     prepare_write_env->length = 0;
+
+    esp_ble_gatts_send_response(profile.gatts_if, param->write.conn_id, param->write.trans_id, status, NULL);
 }
 
 static void gatts_exec_read(esp_gatt_if_t gatts_if, prepare_char_access_t* prepare_read_env, esp_ble_gatts_cb_param_t* param, uint8_t *p_rsp_v, uint16_t v_len)
@@ -527,6 +556,8 @@ static void gatts_exec_read(esp_gatt_if_t gatts_if, prepare_char_access_t* prepa
 
 static void handle_write_event(esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t* param)
 {
+    ESP_LOGI(TAG, "Handling GATT WRITE event");
+
     if (!param->write.is_prep) {
         ESP_LOGI(TAG, "GATT_WRITE_EVT, handle = %d, value len = %d, value :", param->write.handle, param->write.len);
 

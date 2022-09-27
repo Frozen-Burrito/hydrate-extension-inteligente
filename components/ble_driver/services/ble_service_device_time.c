@@ -28,13 +28,13 @@ const esp_gatts_attr_db_t device_time_svc_attr_table[DEV_TIME_SVC_ATTRIBUTE_COUN
 
     /* Declaración de característica para el nivel de batería. */
     [DEV_TIME_IDX_DEVICE_TIME_CHAR] =
-    {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&char_declare_uuid, ESP_GATT_PERM_READ,
-      CHAR_DECLARATION_SIZE, CHAR_DECLARATION_SIZE, (uint8_t *)&char_property_read}},
+    {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&char_declare_uuid, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+      CHAR_DECLARATION_SIZE, CHAR_DECLARATION_SIZE, (uint8_t *)&char_property_read_write}},
 
     /* Valor de la característica del nivel de batería. */
     [DEV_TIME_IDX_DEVICE_TIME_VAL] =
     {{ESP_GATT_RSP_BY_APP}, {ESP_UUID_LEN_16, (uint8_t *)&DEVICE_TIME_CHAR_UUID, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
-      MAX_GATTS_CHAR_LEN_BYTES, sizeof(device_time_svc_data.device_time), (uint8_t *) device_time_svc_data.device_time}},
+      MAX_GATTS_CHAR_LEN_BYTES, 0, NULL}},
 
     /* Declaracion del descriptor de la caracteristica de cantidad de consumo. */
     [DEV_TIME_IDX_DEVICE_TIME_DESCR] =
@@ -96,6 +96,7 @@ esp_gatt_status_t handle_device_time_svc_write_evt(uint16_t attribute_index, esp
     size_t value_length = param->write.len;
     uint8_t* value = param->write.value; 
 
+    ESP_LOGI(TAG, "Handling device time WRITE");
     ESP_LOG_BUFFER_HEX(TAG, value, value_length);
 
     switch (attribute_index) 
