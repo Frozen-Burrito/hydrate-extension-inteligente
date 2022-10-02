@@ -1,0 +1,15 @@
+menu "I2C"
+
+    config I2C_SDA_IO
+        int "I2C SDA GPIO number"
+        default 21 if IDF_TARGET_ESP32
+        help
+            GPIO number connected to SDA line of I2C
+
+    config I2C_SCL_IO
+        int "I2C SCL GPIO number"
+        default 22 if IDF_TARGET_ESP32
+        help
+            GPIO number connected to SCL line of I2C
+
+endmenu

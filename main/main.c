@@ -28,9 +28,9 @@ static const char* TAG = "MAIN";
 #define STARTUP_DELAY_MS 3000
 
 // Configruacion del MPU6050
-static const gpio_num_t I2C_SCL_IO = GPIO_NUM_26;
-static const gpio_num_t I2C_SDA_IO = GPIO_NUM_25;
-#define I2C_MASTER_NUM I2C_NUM_0
+static const gpio_num_t I2C_SCL_IO = (gpio_num_t) CONFIG_I2C_SCL_IO;
+static const gpio_num_t I2C_SDA_IO = (gpio_num_t) CONFIG_I2C_SDA_IO;
+#define MPU6050_I2C_PORT_NUM I2C_NUM_0
 #define I2C_MASTER_FREQ_HZ 100000
 
 #define MAX_RECORD_QUEUE_LEN 5
@@ -144,35 +144,49 @@ static esp_err_t i2c_bus_init(void)
 
     if (ESP_OK == i2c_init_status) 
     {
-        i2c_init_status = i2c_param_config(I2C_MASTER_NUM, &i2c_bus_config);
+        i2c_init_status = i2c_param_config(MPU6050_I2C_PORT_NUM, &i2c_bus_config);
+
+        if (i2c_init_status != ESP_OK) 
+        {
+            ESP_LOGW(TAG, "I2C initialization error (%s)", esp_err_to_name(i2c_init_status));
+        }
     }
 
     if (ESP_OK == i2c_init_status) 
     {
-        i2c_init_status = i2c_driver_install(I2C_MASTER_NUM, i2c_bus_config.mode, 0, 0, 0);
+        i2c_init_status = i2c_driver_install(MPU6050_I2C_PORT_NUM, i2c_bus_config.mode, 0, 0, 0);
+
+        if (i2c_init_status != ESP_OK) 
+        {
+            ESP_LOGW(TAG, "I2C initialization error (%s)", esp_err_to_name(i2c_init_status));
+        }
     }
 
     return i2c_init_status;
 }
 
-static esp_err_t mpu6050_init(mpu6050_handle_t sensor) 
+static esp_err_t mpu6050_init(mpu6050_handle_t* out_sensor) 
 {
     esp_err_t status = ESP_OK;
 
     if (ESP_OK == status) 
     {
         status = i2c_bus_init();
-        sensor = mpu6050_create(I2C_MASTER_NUM, MPU6050_I2C_ADDRESS);
-    }
-
-    if (ESP_OK == status && NULL != sensor) 
-    {
-        status = mpu6050_config(sensor, ACCE_FS_4G, GYRO_FS_500DPS);
     }
 
     if (ESP_OK == status) 
     {
-        status = mpu6050_wake_up(sensor);
+        *out_sensor = mpu6050_create(MPU6050_I2C_PORT_NUM, MPU6050_I2C_ADDRESS);
+    }
+
+    if (ESP_OK == status) 
+    {
+        status = mpu6050_config(*out_sensor, ACCE_FS_4G, GYRO_FS_500DPS);
+    }
+
+    if (ESP_OK == status) 
+    {
+        status = mpu6050_wake_up(*out_sensor);
     }
 
     return status;
@@ -593,21 +607,24 @@ static void read_sensors_measurements_task(void* pvParameters)
     static mpu6050_handle_t mpu6050 = NULL;
     uint8_t mpu6050_deviceid;
 
-    esp_err_t hx711_status = ESP_OK;
-    esp_err_t mpu6050_status = ESP_OK;
+    esp_err_t hx711_init_status = ESP_OK;
+    esp_err_t mpu6050_init_status = ESP_OK;
+    esp_err_t hx711_read_status = ESP_OK;
+    esp_err_t mpu6050_read_status = ESP_OK;
 
     // Inicializar los sensores.
-    hx711_status = hx711_init(&hx711_sensor);
-    mpu6050_status = mpu6050_init(mpu6050);
+    hx711_init_status = hx711_init(&hx711_sensor);
+    mpu6050_init_status = mpu6050_init(&mpu6050);
     battery_monitor_status = battery_monitor_init();
 
-    if (ESP_OK == mpu6050_status)
+    if (ESP_OK == mpu6050_init_status)
     {
-        mpu6050_status = mpu6050_get_deviceid(mpu6050, &mpu6050_deviceid);
+        mpu6050_init_status = mpu6050_get_deviceid(mpu6050, &mpu6050_deviceid);
     }
 
-    ESP_LOGI(TAG, "Battery sensor status (%s)", esp_err_to_name(battery_monitor_status));
-    ESP_LOGI(TAG, "MPU6050 device ID: %i", mpu6050_deviceid);
+    ESP_LOGI(TAG, "HX711 sensor status (%s)", esp_err_to_name(hx711_init_status));
+    ESP_LOGI(TAG, "MPU6050 sensor status (%s), device ID = %d", esp_err_to_name(mpu6050_init_status), mpu6050_deviceid);
+    ESP_LOGI(TAG, "Battery monitor status (%s)", esp_err_to_name(battery_monitor_status));
 
     TimerHandle_t xBatteryLevelTimer = xTimerCreate(
         "battery_level_timer",
@@ -625,29 +642,37 @@ static void read_sensors_measurements_task(void* pvParameters)
         // Obtener lecturas de los sensores.
         sensor_measures_t sensor_data = {};
 
-        if (ESP_OK == hx711_status) 
+        if (ESP_OK == hx711_init_status) 
         {
-            hx711_status = hx711_wait_for_data(&hx711_sensor, 500);
-        }
-
-        if (ESP_OK == hx711_status) 
-        {
-            hx711_status = hx711_read_average(
+            hx711_read_status = hx711_read_average(
                 &hx711_sensor, 
                 CONFIG_HX711_AVG_SAMPLES_COUNT, 
                 &sensor_data.raw_weight_data
             );
-        }
 
-        if (ESP_OK == mpu6050_status) 
+            if (ESP_ERR_TIMEOUT == hx711_read_status) 
+            {
+                ESP_LOGW(TAG, "HX711 data read timeout");
+            } else if (ESP_OK != hx711_read_status) 
+            {
+                ESP_LOGW(TAG, "HX711 read error (%s)", esp_err_to_name(hx711_read_status));
+            }
+        } 
+
+        if (ESP_OK == mpu6050_init_status) 
         {
             // Obtener mediciones del MPU6050.
-            mpu6050_status = mpu6050_get_acce(mpu6050, &sensor_data.acceleration);
-            mpu6050_status = mpu6050_get_gyro(mpu6050, &sensor_data.gyro);
-            mpu6050_status = mpu6050_get_temp(mpu6050, &sensor_data.temperature);
+            mpu6050_read_status = mpu6050_get_acce(mpu6050, &sensor_data.acceleration);
+            mpu6050_read_status = mpu6050_get_gyro(mpu6050, &sensor_data.gyro);
+            mpu6050_read_status = mpu6050_get_temp(mpu6050, &sensor_data.temperature);
+
+            if (ESP_OK != mpu6050_read_status) 
+            {
+                ESP_LOGW(TAG, "Error obtaining data from MPU6050 (%s)", esp_err_to_name(mpu6050_read_status));
+            }
         }
 
-        if (ESP_OK == hx711_status && ESP_OK == mpu6050_status && NULL != xSensorDataQueue) 
+        if (ESP_OK == hx711_read_status && ESP_OK == mpu6050_read_status && NULL != xSensorDataQueue) 
         {
             ESP_LOGI(
                 TAG, 
@@ -667,6 +692,8 @@ static void read_sensors_measurements_task(void* pvParameters)
             if (!dataWasSent) {
                 ESP_LOGW(TAG, "Las lecturas de los sensores no pudieron ser enviadas");
             }
+        } else {
+            ESP_LOGW(TAG, "Something went wrong while getting sensor readings (hx711 %s) (mpu6050 %s) (xSensorDataQueue != NULL ? %d)", esp_err_to_name(hx711_read_status), esp_err_to_name(mpu6050_read_status), (xSensorDataQueue != NULL));
         }
 
         vTaskDelay(measurementIntervalMs);
@@ -677,7 +704,7 @@ static void read_sensors_measurements_task(void* pvParameters)
 
     hx711_set_power(&hx711_sensor, true);
     mpu6050_delete(mpu6050);
-    i2c_driver_delete(I2C_MASTER_NUM);
+    i2c_driver_delete(MPU6050_I2C_PORT_NUM);
 
     vTaskDelete(NULL);
 }
