@@ -4,6 +4,7 @@
 #include <esp_sleep.h>
 #include <driver/rtc_io.h>
 #include <soc/rtc.h>
+#include <esp_pm.h>
 
 #if CONFIG_IDF_TARGET_ESP32
 #include <esp32/ulp.h>
@@ -16,22 +17,39 @@
 #include <esp_err.h>
 #include <esp_log.h>
 
-#ifdef CONFIG_ULP_SENSOR_WAKEUP
-#if CONFIG_IDF_TARGET_ESP32
-/*
- * 
+/**
+ * @brief Permite activar o desactivar el sueño ligero automático.
  */
-#define ULP_DATA_OFFSET 36
-#endif
+esp_err_t setup_light_sleep(bool enable_auto_light_sleep);
 
-void enter_deep_sleep(void);
+/**
+ * @brief Configura las fuentes que pueden despertar al sistema cuando está en sueño profundo.
+ */
+esp_err_t setup_wakeup_sources(void);
 
-esp_err_t setup_sleep_wakeup_sources(void);
+/**
+ * @brief Debería ser invocada por el programa principal después de despertar de 
+ * sueño profundo, para configurar el manejo de poder y manejar la causa de wakeup. 
+ */
+esp_err_t after_wakeup(void);
 
-esp_err_t config_auto_light_sleep(bool enable_auto_light_sleep);
+/**
+ * @brief Registra un módulo que necesita teardown antes de que el 
+ * administrador de poder comience un sueño profundo.
+ */ 
+esp_err_t add_module_for_deep_sleep_confirmation(const char* const module_tag);
 
-void calculate_sleep_duration(void); 
+/**
+ * @brief Le indica al administrador de poder si el módulo identificado con
+ * module_tag está listo o no para que el sistema entre en sueño proufndo. 
+ */ 
+esp_err_t set_module_ready_for_deep_sleep(const char* const module_tag, bool is_ready);
 
-void log_sleep_wakeup_cause(void);
+/**
+ * @brief Prepara al sistema para entrar en sueño profundo. Espera a que 
+ * todos los módulos señalen que están listos y finalmente comienza el
+ * sueño profundo. 
+ */
+void begin_deep_sleep_when_ready();
 
 #endif /* _POWER_MANAGER_H_ */
