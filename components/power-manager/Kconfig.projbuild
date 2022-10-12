@@ -1,0 +1,27 @@
+menu "Power management configuration"
+
+    config LIGHT_SLEEP_ENABLED
+        int "PD/SCK GPIO number"
+        default 18 if IDF_TARGET_ESP32
+        help
+            GPIO number connected to PD/SCK pin of hx711
+
+    config USE_DEEP_SLEEP
+        int "PD/SCK GPIO number"
+        default 18 if IDF_TARGET_ESP32
+        help
+            GPIO number connected to PD/SCK pin of hx711
+
+    config POWER_ON_GPIO_NUM
+        int "GPIO for wakeup"
+        default 14 if IDF_TARGET_ESP32
+        help
+            GPIO number that will be used as a sleep wakeup source
+
+    config ULP_MOVEMENT_WAKEUP
+        bool "Wakeup when ULP detects movement"
+        default true
+        help
+            If true, the device will wakeup from sleep whenever the ULP detects acceleration and rotation.
+        
+endmenu
