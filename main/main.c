@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -36,8 +37,12 @@ static const gpio_num_t I2C_SDA_IO = (gpio_num_t) CONFIG_I2C_SDA_IO;
 #define MAX_RECORD_QUEUE_LEN 5
 #define MAX_SYNC_QUEUE_LEN 5
 #define BATTERY_LVL_QUEUE_SIZE 1
-#define MAX_SENSOR_DATA_BUF_LEN 5
+
+#define NUM_SENSOR_MEASURES_PER_SECOND 10
+#define MAX_SENSOR_DATA_BUF_SECONDS 5
+#define MAX_SENSOR_DATA_BUF_LEN MAX_SENSOR_DATA_BUF_SECONDS * NUM_SENSOR_MEASURES_PER_SECOND
 #define MAX_SENSOR_DATA_QUEUE_LEN 10
+
 #define RECORD_RECEIVE_TIMEOUT_MS 500
 #define NUM_BATTERY_CHARGE_SAMPLES 5
 
@@ -62,12 +67,10 @@ static esp_err_t send_record_to_sync(const hydration_record_t* hydrationRecord, 
     // enviar el registro a la queue de almacenamiento.
     ble_status_t connectionStatus = ble_wait_for_state(PAIRED, true, 0);
 
-    ESP_LOGI(
-        TAG, 
-        "Nuevo registro de hidratacion generado: { water: %i, temp: %i, bat: %i, time: %lld}",
-        hydrationRecord->water_amount, hydrationRecord->temperature, 
-        hydrationRecord->battery_level, hydrationRecord->timestamp
-    );
+    const char[100] strRegistroHidratacion = {};
+    hydration_record_to_string(strRegistroHidratacion, hydrationRecord);
+
+    ESP_LOGI(TAG, strRegistroHidratacion);
 
     esp_err_t status = ESP_OK;
         
@@ -402,10 +405,17 @@ static void record_generator_task(void* pvParameters)
 
         if (readingsWereReceived) 
         {
-            //TODO: algoritmo para determinar si las mediciones en readingsBuffer
+            hydration_record_t hydrationRecord = {};
+            esp_err_t record_creation_status = ESP_OK;
+
+            // Algoritmo para determinar si las mediciones en readingsBuffer
             // son indicativas de consumo de agua.
-            bool hydrationRecordCreated = true;
-            hydration_record_t hydrationRecord = create_random_record();
+            bool measuresRepresentHydration = do_measures_represent_hydration(readingsBuffer, MAX_SENSOR_DATA_BUF_LEN);
+
+            if (measuresRepresentHydration) {
+
+                record_creation_status = hydration_record_from_measures(readingsBuffer, MAX_SENSOR_DATA_BUF_LEN, &hydrationRecord);
+            }
 
             if (hydrationRecordCreated) 
             {
@@ -421,7 +431,7 @@ static void record_generator_task(void* pvParameters)
 
                 if (batteryDataAvailable == pdPASS) 
                 {
-                    // hydrationRecord.battery_level = battery_measurement.remaining_charge; 
+                    hydrationRecord.battery_level = battery_measurement.remaining_charge; 
                 }
 
                 bool wasRecordStored = false;
@@ -595,7 +605,7 @@ static void communication_task(void* pvParameters)
 
 static void read_sensors_measurements_task(void* pvParameters) 
 {
-    static TickType_t measurementIntervalMs = pdMS_TO_TICKS(2500);
+    static TickType_t measurementIntervalMs = pdMS_TO_TICKS(1000 / NUM_SENSOR_MEASURES_PER_SECOND);
     static const TickType_t batteryMeasurePeriodMs = pdMS_TO_TICKS(10 * 1000);
 
     static hx711_t hx711_sensor = {
@@ -642,6 +652,11 @@ static void read_sensors_measurements_task(void* pvParameters)
         // Obtener lecturas de los sensores.
         sensor_measures_t sensor_data = {};
 
+        if (ESP_OK == hx711_init_status && ESP_OK == mpu6050_init_status) 
+        {
+            start_measurement_period(&sensor_data);
+        } 
+
         if (ESP_OK == hx711_init_status) 
         {
             hx711_read_status = hx711_read_average(
@@ -672,15 +687,22 @@ static void read_sensors_measurements_task(void* pvParameters)
             }
         }
 
+        if (ESP_OK == hx711_init_status && ESP_OK == mpu6050_init_status) 
+        {
+            end_measurement_period(&sensor_data);
+        } 
+
         if (ESP_OK == hx711_read_status && ESP_OK == mpu6050_read_status && NULL != xSensorDataQueue) 
         {
             ESP_LOGI(
                 TAG, 
-                "Lecturas de sensores: { raw_weight: %i, accel: (%.2f, %.2f, %.2f), gyro: (%.2f, %.2f, %.2f), temp: %.2f}", 
+                "Lecturas de sensores: { raw_weight: %i, accel: (%.2f, %.2f, %.2f), gyro: (%.2f, %.2f, %.2f), temp: %.2f, interval:%lld-%lld ms}", 
                 sensor_data.raw_weight_data,
                 sensor_data.acceleration.acce_x, sensor_data.acceleration.acce_y, sensor_data.acceleration.acce_z, 
                 sensor_data.gyro.gyro_x, sensor_data.gyro.gyro_y, sensor_data.gyro.gyro_z, 
-                sensor_data.temperature.temp
+                sensor_data.temperature.temp,
+                sensor_data.start_time_ms,
+                sensor_data.end_time_ms,
             );
 
             BaseType_t dataWasSent = xQueueSendToBack(

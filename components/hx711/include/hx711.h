@@ -31,4 +31,8 @@ esp_err_t hx711_read_data(hx711_t* device, int32_t* data);
 
 esp_err_t hx711_read_average(hx711_t* device, size_t num_samples, int32_t* data);
 
+esp_err_t hx711_calibrate(hx711_t* device);
+
+uint16_t hx711_volume_ml_from_measurement(const int32_t* measurement);
+
 #endif /** _HX711_H_ **/

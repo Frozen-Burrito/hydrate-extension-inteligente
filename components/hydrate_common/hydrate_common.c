@@ -46,3 +46,44 @@ static int32_t random_next_int(int32_t range, int32_t min) {
 
     return random_number;
 }
+
+esp_err_t hydration_record_to_string(const char* out_buf, const hydration_record_t* hydration_record)
+{
+    if (NULL == out_buf || NULL == hydration_record) 
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    snprintf(
+        out_buf, 
+        sizeof(out_buf), 
+        "Registro de Hidratacion { water_ml: %i, temp_celsius: %i, bat_percent: %i, time_s: %lld}",
+        hydrationRecord->water_amount, hydrationRecord->temperature, 
+        hydrationRecord->battery_level, hydrationRecord->timestamp
+    );
+
+    return ESP_OK;
+}
+
+void start_measurement_period(const sensor_measures_t* measurement)
+{
+    if (NULL == measurement) 
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    measurement->start_time_ms = (int64_t) time(NULL);
+}
+
+void end_measurement_period(const sensor_measures_t* measurement)
+{
+    if (NULL == measurement) 
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    measurement->end_time_ms = (int64_t) time(NULL);
+}
+
+bool 
+

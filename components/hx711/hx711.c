@@ -11,6 +11,8 @@ static const char* TAG = "HX711";
 static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 static const int16_t NUM_DATA_BITS = 24;
 
+static int32_t base_measurement = 0;
+
 static uint32_t read_raw(gpio_num_t data_out, gpio_num_t pd_sck, hx711_gain_t gain) 
 {
     ESP_LOGD(TAG, "Reading raw data (DOUT = %d, SCK = %d, GAIN = %d)", data_out, pd_sck, gain);
