@@ -1,0 +1,27 @@
+menu "Power management configuration"
+
+    config LIGHT_SLEEP_ENABLED
+        bool "PD/SCK GPIO number"
+        default true
+        help
+            If true, the device will enter light sleep if it is inactive and will optimize CPU and APB frequency.
+
+    config USE_DEEP_SLEEP
+        bool "PD/SCK GPIO number"
+        default true
+        help
+            If true, the device will enter deep sleep after certain conditions are met.
+
+    config POWER_ON_GPIO_NUM
+        int "GPIO for wakeup"
+        default 14 if IDF_TARGET_ESP32
+        help
+            GPIO number of the external input that will be used as a deep sleep wakeup source
+
+    config ULP_MOVEMENT_WAKEUP
+        bool "Wakeup when ULP detects motion"
+        default true
+        help
+            If true, the device will wakeup from sleep whenever the ULP detects acceleration and rotation.
+        
+endmenu
