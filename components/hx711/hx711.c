@@ -11,7 +11,9 @@ static const char* TAG = "HX711";
 static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 static const int16_t NUM_DATA_BITS = 24;
 
-static int32_t base_measurement = 0;
+static const int32_t lifted_raw_weight = 20000;
+static const int32_t raw_weight_with_container = 38000;
+static const int32_t raw_weight_per_ml = 150;
 
 static uint32_t read_raw(gpio_num_t data_out, gpio_num_t pd_sck, hx711_gain_t gain) 
 {
@@ -194,4 +196,41 @@ esp_err_t hx711_read_average(hx711_t* device, size_t num_samples, int32_t* data)
     ESP_LOGD(TAG, "HX711 read average = %d (%d samples)", *data, num_samples);
 
     return ESP_OK;
+}
+
+uint16_t hx711_volume_ml_from_measurement(const int32_t* measurement)
+{
+    // Considerar el peso base del dispositivo, el peso cuando está 
+    // siendo sostemido por arriba y la ligera diferencia entre el peso
+    // base y el peso con contenedor.
+    uint16_t volume_ml = 0;
+
+    if (NULL == measurement) 
+    {
+        ESP_LOGW(TAG, "Measurement for raw weight was null");
+        volume_ml = 0;
+    }
+
+    bool is_not_lifted = *measurement > lifted_raw_weight;
+    bool has_container = *measurement > raw_weight_with_container;
+
+    if (is_not_lifted) 
+    {
+        if (has_container) 
+        {
+            int32_t raw_liquid_weight = *measurement - raw_weight_with_container;
+            assert(raw_liquid_weight >= 0);
+
+            volume_ml = raw_liquid_weight / raw_weight_per_ml;
+
+        } else 
+        {
+            // Si no tiene el peso del contenedor, no puede tener un volumen de 
+            // liquido.
+            ESP_LOGI(TAG, "No hay un contenedor de agua sobre la extension");
+            volume_ml = 0;
+        }
+    }
+
+    return volume_ml;
 }

@@ -253,7 +253,7 @@ ble_status_t ble_wait_for_state(const ble_status_t status, const bool match_exac
 
     ble_status_t result_status = event_bits_to_status(resultBits);
 
-    ESP_LOGI(TAG, "Estado de BLE: %s", ble_status_to_string(result_status));
+    ESP_LOGD(TAG, "Estado de BLE: %s", ble_status_to_string(result_status));
 
     return result_status;
 }

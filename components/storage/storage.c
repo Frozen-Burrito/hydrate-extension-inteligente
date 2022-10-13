@@ -125,7 +125,7 @@ esp_err_t store_hydration_record(const nvs_handle_t handle, const int16_t record
     if (ESP_OK == write_status) {
         char keyWaterAmountIdx[NVS_KEY_NAME_MAX_SIZE];
         snprintf(keyWaterAmountIdx, NVS_KEY_NAME_MAX_SIZE, keyWaterAmount, adjustedIndex);
-        ESP_LOGI(TAG, "Sample key name: %s", keyWaterAmountIdx);
+        ESP_LOGD(TAG, "Sample key name: %s", keyWaterAmountIdx);
 
         write_status = nvs_set_u16(handle, keyWaterAmountIdx, record->water_amount);
         writeCount++;
@@ -134,7 +134,7 @@ esp_err_t store_hydration_record(const nvs_handle_t handle, const int16_t record
     if (ESP_OK == write_status) {
         char keyTemperatureIdx[NVS_KEY_NAME_MAX_SIZE];
         snprintf(keyTemperatureIdx, NVS_KEY_NAME_MAX_SIZE, keyTemperature, adjustedIndex);
-        ESP_LOGI(TAG, "Sample key name: %s", keyTemperatureIdx);
+        ESP_LOGD(TAG, "Sample key name: %s", keyTemperatureIdx);
         write_status = nvs_set_i16(handle, keyTemperatureIdx, record->temperature);
         writeCount++;
     }
@@ -142,7 +142,7 @@ esp_err_t store_hydration_record(const nvs_handle_t handle, const int16_t record
     if (ESP_OK == write_status) {
         char keyBatteryLvlIdx[NVS_KEY_NAME_MAX_SIZE];
         snprintf(keyBatteryLvlIdx, NVS_KEY_NAME_MAX_SIZE, keyBatteryLvl, adjustedIndex);
-        ESP_LOGI(TAG, "Sample key name: %s", keyBatteryLvlIdx);
+        ESP_LOGD(TAG, "Sample key name: %s", keyBatteryLvlIdx);
         write_status = nvs_set_u8(handle, keyBatteryLvlIdx, record->battery_level);
         writeCount++;
     }
@@ -150,7 +150,7 @@ esp_err_t store_hydration_record(const nvs_handle_t handle, const int16_t record
     if (ESP_OK == write_status) {
         char keyTimestampIdx[NVS_KEY_NAME_MAX_SIZE];
         snprintf(keyTimestampIdx, NVS_KEY_NAME_MAX_SIZE, keyTimestamp, adjustedIndex);
-        ESP_LOGI(TAG, "Sample key name: %s", keyTimestampIdx);
+        ESP_LOGD(TAG, "Sample key name: %s", keyTimestampIdx);
         write_status = nvs_set_i64(handle, keyTimestampIdx, record->timestamp);
         writeCount++;
     }

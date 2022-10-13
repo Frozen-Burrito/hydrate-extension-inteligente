@@ -20,6 +20,7 @@ typedef struct {
  */
 typedef struct {
     int32_t raw_weight_data;
+    int32_t volume_ml;
     mpu6050_acce_value_t acceleration;
     mpu6050_gyro_value_t gyro;
     mpu6050_temp_value_t temperature;
@@ -27,24 +28,19 @@ typedef struct {
     int64_t end_time_ms;
 } sensor_measures_t;
 
-hydration_record_t create_random_record(void);
+esp_err_t hydration_record_to_string(char* out_buf, const hydration_record_t* hydration_record);
 
-esp_err_t hydration_record_to_string(const char* out_buf, const hydration_record_t* hydration_record);
-
-esp_err_t start_measurement_period(const sensor_measures_t* measurement);
-esp_err_t end_measurement_period(const sensor_measures_t* measurement);
-
-bool do_measures_represent_hydration(const sensor_measures_t measurements[], const size_t measurement_count);
+esp_err_t start_measurement_period(sensor_measures_t* measurement);
+esp_err_t end_measurement_period(sensor_measures_t* measurement);
 
 /**
  * @brief Determina si un conjunto de [sensor_measures_t] está asociado
  * a un consumo de agua. 
  * 
- * @returns ESP_OK - La inferencia sobre las medidas fue realizada correctamente.
- * @returns ESP_ERR_INVALID_ARG - out_record es NULL o measurement_count es 0.
- * @returns ESP_FAIL - Error al intentar determinar hidratacion.
+ * @returns true - Las medidas representan un consumo de agua, out_record fue actualizado con sus datos.
+ * @returns false - No hubo un consumo de agua, o out_record es NULL o measurement_count es 0.
  */
-esp_err_t hydration_record_from_measures(
+bool hydration_record_from_measures(
     const sensor_measures_t measurements[], 
     const size_t measurement_count,
     hydration_record_t* out_record

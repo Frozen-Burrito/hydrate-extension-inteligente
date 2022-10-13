@@ -3,6 +3,7 @@
 
 #include <driver/gpio.h>
 #include <stdbool.h>
+#include <math.h>
 #include <esp_err.h>
 
 typedef enum {

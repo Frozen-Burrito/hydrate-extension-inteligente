@@ -38,7 +38,7 @@ static const gpio_num_t I2C_SDA_IO = (gpio_num_t) CONFIG_I2C_SDA_IO;
 #define MAX_SYNC_QUEUE_LEN 5
 #define BATTERY_LVL_QUEUE_SIZE 1
 
-#define NUM_SENSOR_MEASURES_PER_SECOND 10
+#define NUM_SENSOR_MEASURES_PER_SECOND 4
 #define MAX_SENSOR_DATA_BUF_SECONDS 5
 #define MAX_SENSOR_DATA_BUF_LEN MAX_SENSOR_DATA_BUF_SECONDS * NUM_SENSOR_MEASURES_PER_SECOND
 #define MAX_SENSOR_DATA_QUEUE_LEN 10
@@ -50,6 +50,8 @@ static QueueHandle_t xStorageQueue = NULL;
 static QueueHandle_t xSyncQueue = NULL;
 static QueueHandle_t xSensorDataQueue = NULL;
 static QueueHandle_t xBatteryLevelQueue = NULL;
+
+static const TickType_t sleep_period_ticks = pdMS_TO_TICKS(60 * 1000);
 
 static esp_err_t battery_monitor_status = ESP_FAIL;
 
@@ -67,10 +69,10 @@ static esp_err_t send_record_to_sync(const hydration_record_t* hydrationRecord, 
     // enviar el registro a la queue de almacenamiento.
     ble_status_t connectionStatus = ble_wait_for_state(PAIRED, true, 0);
 
-    const char[100] strRegistroHidratacion = {};
+    char strRegistroHidratacion[100] = {};
     hydration_record_to_string(strRegistroHidratacion, hydrationRecord);
 
-    ESP_LOGI(TAG, strRegistroHidratacion);
+    ESP_LOGI(TAG, "%s", strRegistroHidratacion);
 
     esp_err_t status = ESP_OK;
         
@@ -390,34 +392,31 @@ static void record_generator_task(void* pvParameters)
 
     static const TickType_t waitForReadingsTimeoutMs = pdMS_TO_TICKS(10000);
 
-    static sensor_measures_t readingsBuffer[MAX_SENSOR_DATA_BUF_LEN];
+    static sensor_measures_t readingsBuffer[MAX_SENSOR_DATA_BUF_LEN] = {};
     size_t indexOfLatestSensorReadings = 0;
+    bool has_reached_required_sample_count = false;
 
     while (true) 
     {
-        BaseType_t readingsWereReceived = xQueueReceive(
+        BaseType_t measurementsWereReceived = xQueueReceive(
             xSensorDataQueue,
             &readingsBuffer[indexOfLatestSensorReadings],
             waitForReadingsTimeoutMs
         );
 
-        readingsWereReceived = pdPASS;
+        measurementsWereReceived = pdPASS;
 
-        if (readingsWereReceived) 
+        if (measurementsWereReceived) 
         {
             hydration_record_t hydrationRecord = {};
-            esp_err_t record_creation_status = ESP_OK;
-
+            
             // Algoritmo para determinar si las mediciones en readingsBuffer
             // son indicativas de consumo de agua.
-            bool measuresRepresentHydration = do_measures_represent_hydration(readingsBuffer, MAX_SENSOR_DATA_BUF_LEN);
+            bool was_hydration_recorded = has_reached_required_sample_count && hydration_record_from_measures(readingsBuffer, MAX_SENSOR_DATA_BUF_LEN, &hydrationRecord);
 
-            if (measuresRepresentHydration) {
+            ESP_LOGI(TAG, "Do measures represent hydration: %s", (was_hydration_recorded ? "yes" : "no" ));
 
-                record_creation_status = hydration_record_from_measures(readingsBuffer, MAX_SENSOR_DATA_BUF_LEN, &hydrationRecord);
-            }
-
-            if (hydrationRecordCreated) 
+            if (was_hydration_recorded) 
             {
                 // Obtener la carga restante de la batería, para asociarla
                 // con el registro de hidratación.
@@ -472,7 +471,16 @@ static void record_generator_task(void* pvParameters)
                 }
             }
 
-            indexOfLatestSensorReadings = (indexOfLatestSensorReadings + 1) % MAX_SENSOR_DATA_BUF_LEN;
+            if (indexOfLatestSensorReadings >= MAX_SENSOR_DATA_BUF_LEN - 1)
+            {
+                has_reached_required_sample_count = true;
+            }
+
+            ++indexOfLatestSensorReadings;
+            indexOfLatestSensorReadings = (indexOfLatestSensorReadings >= MAX_SENSOR_DATA_BUF_LEN)
+                ? indexOfLatestSensorReadings % MAX_SENSOR_DATA_BUF_LEN
+                : indexOfLatestSensorReadings;
+
         } else {
             ESP_LOGW(TAG, "No hay mediciones de sensores para generar registros de hidratacion");
         }
@@ -665,6 +673,11 @@ static void read_sensors_measurements_task(void* pvParameters)
                 &sensor_data.raw_weight_data
             );
 
+            if (ESP_OK == hx711_read_status)
+            {
+                uint16_t volume_ml = hx711_volume_ml_from_measurement(&sensor_data.raw_weight_data);
+                sensor_data.volume_ml = volume_ml;
+            }
             if (ESP_ERR_TIMEOUT == hx711_read_status) 
             {
                 ESP_LOGW(TAG, "HX711 data read timeout");
@@ -696,13 +709,14 @@ static void read_sensors_measurements_task(void* pvParameters)
         {
             ESP_LOGI(
                 TAG, 
-                "Lecturas de sensores: { raw_weight: %i, accel: (%.2f, %.2f, %.2f), gyro: (%.2f, %.2f, %.2f), temp: %.2f, interval:%lld-%lld ms}", 
+                "Lecturas de sensores: { raw_weight: %i, volume: %uml, accel: (%.2f, %.2f, %.2f), gyro: (%.2f, %.2f, %.2f), temp: %.2f, interval:%lld-%lld ms}", 
                 sensor_data.raw_weight_data,
+                sensor_data.volume_ml,
                 sensor_data.acceleration.acce_x, sensor_data.acceleration.acce_y, sensor_data.acceleration.acce_z, 
                 sensor_data.gyro.gyro_x, sensor_data.gyro.gyro_y, sensor_data.gyro.gyro_z, 
                 sensor_data.temperature.temp,
                 sensor_data.start_time_ms,
-                sensor_data.end_time_ms,
+                sensor_data.end_time_ms
             );
 
             BaseType_t dataWasSent = xQueueSendToBack(
