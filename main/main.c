@@ -11,10 +11,6 @@
 #include <esp_system.h>
 #include <esp_log.h>
 #include <driver/gpio.h>
-#include <driver/i2c.h>
-
-// Componentes gestionados con IDF component manager
-#include <mpu6050.h>
 
 // Componentes personalizados
 #include "hydrate_common.h"
@@ -22,18 +18,13 @@
 #include "ble_driver.h"
 #include "ble_common.h"
 #include "hx711.h"
+#include "mpu6050_sensor.h"
 #include "battery_monitor.h"
 #include "power-manager.h"
 
 static const char* TAG = "MAIN";
 
 #define STARTUP_DELAY_MS 3000
-
-// Configruacion del MPU6050
-static const gpio_num_t I2C_SCL_IO = (gpio_num_t) CONFIG_I2C_SCL_IO;
-static const gpio_num_t I2C_SDA_IO = (gpio_num_t) CONFIG_I2C_SDA_IO;
-#define MPU6050_I2C_PORT_NUM I2C_NUM_0
-#define I2C_MASTER_FREQ_HZ 100000
 
 #define MAX_RECORD_QUEUE_LEN 5
 #define MAX_SYNC_QUEUE_LEN 5
@@ -139,70 +130,6 @@ static void power_management_timer_callback(TimerHandle_t xTimer)
     ESP_LOGI(TAG, "Preparing for deep sleep");
 
     begin_deep_sleep_when_ready();
-}
-
-static esp_err_t i2c_bus_init(void) 
-{
-    i2c_config_t i2c_bus_config = {
-        .mode = I2C_MODE_MASTER,
-        .sda_io_num = I2C_SDA_IO,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
-        .scl_io_num = I2C_SCL_IO,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master.clk_speed = I2C_MASTER_FREQ_HZ,
-        .clk_flags = I2C_SCLK_SRC_FLAG_FOR_NOMAL,
-    };
-
-    esp_err_t i2c_init_status = ESP_OK; 
-
-    if (ESP_OK == i2c_init_status) 
-    {
-        i2c_init_status = i2c_param_config(MPU6050_I2C_PORT_NUM, &i2c_bus_config);
-
-        if (i2c_init_status != ESP_OK) 
-        {
-            ESP_LOGW(TAG, "I2C initialization error (%s)", esp_err_to_name(i2c_init_status));
-        }
-    }
-
-    if (ESP_OK == i2c_init_status) 
-    {
-        i2c_init_status = i2c_driver_install(MPU6050_I2C_PORT_NUM, i2c_bus_config.mode, 0, 0, 0);
-
-        if (i2c_init_status != ESP_OK) 
-        {
-            ESP_LOGW(TAG, "I2C initialization error (%s)", esp_err_to_name(i2c_init_status));
-        }
-    }
-
-    return i2c_init_status;
-}
-
-static esp_err_t mpu6050_init(mpu6050_handle_t* out_sensor) 
-{
-    esp_err_t status = ESP_OK;
-
-    if (ESP_OK == status) 
-    {
-        status = i2c_bus_init();
-    }
-
-    if (ESP_OK == status) 
-    {
-        *out_sensor = mpu6050_create(MPU6050_I2C_PORT_NUM, MPU6050_I2C_ADDRESS);
-    }
-
-    if (ESP_OK == status) 
-    {
-        status = mpu6050_config(*out_sensor, ACCE_FS_4G, GYRO_FS_500DPS);
-    }
-
-    if (ESP_OK == status) 
-    {
-        status = mpu6050_wake_up(*out_sensor);
-    }
-
-    return status;
 }
 
 static void storage_task(void* pvParameters) 
@@ -630,9 +557,6 @@ static void read_sensors_measurements_task(void* pvParameters)
         .gain = HX711_GAIN_A_64
     };
 
-    static mpu6050_handle_t mpu6050 = NULL;
-    uint8_t mpu6050_deviceid;
-
     esp_err_t hx711_init_status = ESP_OK;
     esp_err_t mpu6050_init_status = ESP_OK;
     esp_err_t hx711_read_status = ESP_OK;
@@ -640,17 +564,19 @@ static void read_sensors_measurements_task(void* pvParameters)
 
     // Inicializar los sensores.
     hx711_init_status = hx711_init(&hx711_sensor);
-    mpu6050_init_status = mpu6050_init(&mpu6050);
+    mpu6050_init_status = mpu6050_init(true);
     battery_monitor_status = battery_monitor_init();
+
+    ESP_LOGI(TAG, "HX711 sensor status (%s)", esp_err_to_name(hx711_init_status));
+    ESP_LOGI(TAG, "MPU6050 sensor status (%s)", esp_err_to_name(mpu6050_init_status));
+    ESP_LOGI(TAG, "Battery monitor status (%s)", esp_err_to_name(battery_monitor_status));
 
     if (ESP_OK == mpu6050_init_status)
     {
-        mpu6050_init_status = mpu6050_get_deviceid(mpu6050, &mpu6050_deviceid);
+        uint8_t mpu6050_deviceid;
+        mpu6050_get_i2c_id(&mpu6050_deviceid);
+        ESP_LOGI(TAG, "MPU6050 sensor device ID = %2x", mpu6050_deviceid);
     }
-
-    ESP_LOGI(TAG, "HX711 sensor status (%s)", esp_err_to_name(hx711_init_status));
-    ESP_LOGI(TAG, "MPU6050 sensor status (%s), device ID = %d", esp_err_to_name(mpu6050_init_status), mpu6050_deviceid);
-    ESP_LOGI(TAG, "Battery monitor status (%s)", esp_err_to_name(battery_monitor_status));
 
     TimerHandle_t xBatteryLevelTimer = xTimerCreate(
         "battery_level_timer",
@@ -698,9 +624,7 @@ static void read_sensors_measurements_task(void* pvParameters)
         if (ESP_OK == mpu6050_init_status) 
         {
             // Obtener mediciones del MPU6050.
-            mpu6050_read_status = mpu6050_get_acce(mpu6050, &sensor_data.acceleration);
-            mpu6050_read_status = mpu6050_get_gyro(mpu6050, &sensor_data.gyro);
-            mpu6050_read_status = mpu6050_get_temp(mpu6050, &sensor_data.temperature);
+            mpu6050_read_status = mpu6050_get_measurements(&sensor_data);
 
             if (ESP_OK != mpu6050_read_status) 
             {
@@ -720,9 +644,9 @@ static void read_sensors_measurements_task(void* pvParameters)
                 "Lecturas de sensores: { raw_weight: %i, volume: %uml, accel: (%.2f, %.2f, %.2f), gyro: (%.2f, %.2f, %.2f), temp: %.2f, interval:%lld-%lld ms}", 
                 sensor_data.raw_weight_data,
                 sensor_data.volume_ml,
-                sensor_data.acceleration.acce_x, sensor_data.acceleration.acce_y, sensor_data.acceleration.acce_z, 
-                sensor_data.gyro.gyro_x, sensor_data.gyro.gyro_y, sensor_data.gyro.gyro_z, 
-                sensor_data.temperature.temp,
+                sensor_data.acceleration.x, sensor_data.acceleration.y, sensor_data.acceleration.z, 
+                sensor_data.gyroscope.x, sensor_data.gyroscope.y, sensor_data.gyroscope.z, 
+                sensor_data.temperature,
                 sensor_data.start_time_ms,
                 sensor_data.end_time_ms
             );
@@ -747,8 +671,7 @@ static void read_sensors_measurements_task(void* pvParameters)
     xTimerStop(xBatteryLevelTimer, (TickType_t) 0);
 
     hx711_set_power(&hx711_sensor, true);
-    mpu6050_delete(mpu6050);
-    i2c_driver_delete(MPU6050_I2C_PORT_NUM);
+    mpu6050_free_resources(true);
 
     vTaskDelete(NULL);
 }
@@ -756,8 +679,6 @@ static void read_sensors_measurements_task(void* pvParameters)
 static void setup_power_management(void) 
 {
     after_wakeup();
-
-    setup_wakeup_sources();
 
     xTimerCreate(
         "power_management_timer",
@@ -774,7 +695,7 @@ static esp_err_t setup(void)
     ESP_LOGI(TAG, "Size minimo de heap libre (antes de setup()): %u bytes", esp_get_minimum_free_heap_size());
 
     ESP_LOGD(TAG, "Configurando power management");
-    // setup_power_management();
+    setup_power_management();
 
     ESP_LOGD(TAG, "Inicializando NVS");
 

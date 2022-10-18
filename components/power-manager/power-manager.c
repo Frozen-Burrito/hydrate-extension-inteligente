@@ -35,6 +35,9 @@ static uint32_t ulp_wakeup_period_ms = 100;
 static void init_ulp_program(void);
 static void start_ulp_program(void);
 
+static void init_ulp_rtc_gpio(void);
+static void deinit_ulp_rtc_gpio(void);
+
 // Utilidades
 static void calculate_sleep_duration(void);
 static const char* wakeup_cause_to_name(const esp_sleep_wakeup_cause_t wakeup_cause);
@@ -73,6 +76,15 @@ esp_err_t after_wakeup(void)
         ESP_LOGI(TAG, "Sistema despertado de deep sleep, causa inesperada: %s", cause_name);
         break;
     }
+
+    esp_err_t wakeup_sources_status = setup_wakeup_sources();
+
+    if (ESP_OK != wakeup_sources_status)
+    {
+        ESP_LOGW(TAG, "Error al configurar fuentes de activacion de deep sleep (%s)", esp_err_to_name(wakeup_sources_status));
+    }
+
+    deinit_ulp_rtc_gpio();
     
     xReadyForDeepSleepEvents = xEventGroupCreate();
 
@@ -261,22 +273,6 @@ static void init_ulp_program(void)
         return;
     } 
 
-#if CONFIG_IDF_TARGET_ESP32
-    // Aislar GPIO12 y GPIO15 de sus circuitos externos. Esto es necesario para módulos
-    // que contienen un resisor pull-up externo en GPIO12 (como el ESP32-WROVER)
-    // para minimizar el consumo de corriente.
-    rtc_gpio_isolate(GPIO_NUM_12);
-    rtc_gpio_isolate(GPIO_NUM_15);
-#endif
-
-    //TODO: Configurar perifericos usados por el ULP, incluyendo I2C.
-    rtc_gpio_init((gpio_num_t) CONFIG_I2C_SCL_IO);
-    rtc_gpio_set_direction((gpio_num_t) CONFIG_I2C_SCL_IO, RTC_GPIO_MODE_INPUT_OUTPUT);
-    rtc_gpio_init((gpio_num_t) CONFIG_I2C_SDA_IO);
-    rtc_gpio_set_direction((gpio_num_t) CONFIG_I2C_SDA_IO, RTC_GPIO_MODE_INPUT_OUTPUT);
-
-    //TODO: Inicializar variables usadas por ULP
-
     uint32_t ulp_wakeup_period_us = ulp_wakeup_period_ms * 1000;
     esp_err_t set_wakeup_period_status = ulp_set_wakeup_period(0, ulp_wakeup_period_us);
 
@@ -287,9 +283,39 @@ static void init_ulp_program(void)
     } 
 }
 
+static void init_ulp_rtc_gpio(void)
+{
+#if CONFIG_IDF_TARGET_ESP32
+    // Aislar GPIO12 y GPIO15 de sus circuitos externos. Esto es necesario para módulos
+    // que contienen un resisor pull-up externo en GPIO12 (como el ESP32-WROVER)
+    // para minimizar el consumo de corriente.
+    rtc_gpio_isolate(GPIO_NUM_12);
+    rtc_gpio_isolate(GPIO_NUM_15);
+#endif
+
+    // Configurar perifericos usados por el ULP, incluyendo I2C.
+    rtc_gpio_init((gpio_num_t) CONFIG_I2C_SCL_IO);
+    rtc_gpio_init((gpio_num_t) CONFIG_I2C_SDA_IO);
+
+    rtc_gpio_set_direction((gpio_num_t) CONFIG_I2C_SCL_IO, RTC_GPIO_MODE_INPUT_OUTPUT);
+    rtc_gpio_set_direction((gpio_num_t) CONFIG_I2C_SDA_IO, RTC_GPIO_MODE_INPUT_OUTPUT);
+
+    // Mantener activos los perifericos RTC durante sueño profundo.
+    esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
+}
+
+static void deinit_ulp_rtc_gpio(void)
+{
+    rtc_gpio_deinit((gpio_num_t) CONFIG_I2C_SCL_IO);
+    rtc_gpio_deinit((gpio_num_t) CONFIG_I2C_SDA_IO);
+}
+
 static void start_ulp_program(void)
 {
-    //TODO: inicializar variables usadas por ULP, justo antes de iniciar su ejecucion.
+    init_ulp_rtc_gpio();
+
+    //TODO: inicializar variables usadas por ULP.
+
     esp_err_t run_status = ulp_run(&ulp_entry - RTC_SLOW_MEM);
 
     if (ESP_OK != run_status)

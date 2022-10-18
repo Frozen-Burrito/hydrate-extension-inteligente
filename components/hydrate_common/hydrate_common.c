@@ -24,7 +24,7 @@ static const float max_temperature_celsius = 75.0f;
 static const uint16_t min_volume_delta_ml = 10;
 static const uint16_t max_volume_delta_ml = 250;
 
-static const float accel_maintained_threshold = 0.01f;
+// static const float accel_maintained_threshold = 0.01f;
 
 static const int32_t lifted_raw_weight = 18000;
 
@@ -36,7 +36,7 @@ static int64_t latest_hydration_timestamp_ms = 0;
 static float constrain(float number, float min, float max);
 static int32_t index_of_oldest_measurement(const sensor_measures_t measurements[], const size_t measurement_count);
 static int64_t get_measurement_duration_ms(const sensor_measures_t* measures);
-static bool is_accel_maintained(mpu6050_acce_value_t* previous, mpu6050_acce_value_t* current);
+// static bool is_accel_maintained(mpu6050_acce_value_t* previous, mpu6050_acce_value_t* current);
 
 esp_err_t hydration_record_to_string(char* out_buf, const hydration_record_t* hydration_record)
 {
@@ -66,10 +66,7 @@ esp_err_t start_measurement_period(sensor_measures_t* measurement)
     struct timeval now;
     gettimeofday(&now, NULL);
 
-    // measurement->start_time_ms = (uint64_t) (now.tv_sec * 1000) + (now.tv_usec / 1000);
-    int64_t seconds = (int64_t) now.tv_sec;
-    int64_t microSeconds = (int64_t) now.tv_usec;
-    int64_t millis = (seconds * 1000) + (microSeconds / 1000);
+    int64_t millis = (((int64_t) now.tv_sec) * 1000) + (((int64_t) now.tv_usec) / 1000);
     ESP_LOGD(TAG, "Millis since UNIX epoch: %lld", millis);
     measurement->start_time_ms = millis;
 
@@ -156,7 +153,7 @@ bool hydration_record_from_measures(const sensor_measures_t measurements[], cons
             lifted_duration_ms += measurement_duration_ms;
         }
 
-        temperature_accumulator += constrain(current_measurement->temperature.temp, min_temperature_celsius, max_temperature_celsius);
+        temperature_accumulator += constrain(current_measurement->temperature, min_temperature_celsius, max_temperature_celsius);
 
         ++measures_in_hydration_record;
         record_index = (record_index + 1) % measurement_count;
@@ -227,11 +224,11 @@ static int64_t get_measurement_duration_ms(const sensor_measures_t* measures)
     return duration_ms;
 }
 
-static bool is_accel_maintained(mpu6050_acce_value_t* previous, mpu6050_acce_value_t* current)
-{
-    bool is_x_axis_maintained = fabsf(previous->acce_x - current->acce_x) < accel_maintained_threshold; 
-    bool is_y_axis_maintained = fabsf(previous->acce_y - current->acce_y) < accel_maintained_threshold; 
-    bool is_z_axis_maintained = fabsf(previous->acce_z - current->acce_z) < accel_maintained_threshold; 
+// static bool is_accel_maintained(mpu6050_acce_value_t* previous, mpu6050_acce_value_t* current)
+// {
+//     bool is_x_axis_maintained = fabsf(previous->acce_x - current->acce_x) < accel_maintained_threshold; 
+//     bool is_y_axis_maintained = fabsf(previous->acce_y - current->acce_y) < accel_maintained_threshold; 
+//     bool is_z_axis_maintained = fabsf(previous->acce_z - current->acce_z) < accel_maintained_threshold; 
 
-    return is_x_axis_maintained && is_y_axis_maintained && is_z_axis_maintained;
-}
+//     return is_x_axis_maintained && is_y_axis_maintained && is_z_axis_maintained;
+// }

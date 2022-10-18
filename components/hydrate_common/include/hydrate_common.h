@@ -1,8 +1,6 @@
 #ifndef _HYDRATE_COMMON_H_
 #define _HYDRATE_COMMON_H_
 
-#include <mpu6050.h>
-
 /**
  * @brief Contiene los datos básicos de un registro de 
  * hidratación.
@@ -14,6 +12,12 @@ typedef struct {
     int64_t timestamp;
 } hydration_record_t;
 
+typedef struct {
+    float x;
+    float y;
+    float z;
+} vector_3f_t;
+
 /**
  * @brief Contiene los datos obtenidos para un muestreo determinado de 
  * los sensores.
@@ -21,9 +25,9 @@ typedef struct {
 typedef struct {
     int32_t raw_weight_data;
     int32_t volume_ml;
-    mpu6050_acce_value_t acceleration;
-    mpu6050_gyro_value_t gyro;
-    mpu6050_temp_value_t temperature;
+    vector_3f_t acceleration;
+    vector_3f_t gyroscope;
+    float temperature;
     int64_t start_time_ms;
     int64_t end_time_ms;
 } sensor_measures_t;
