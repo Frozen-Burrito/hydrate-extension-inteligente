@@ -9,7 +9,17 @@
 
 #include <mpu6050.h>
 
-#include "hydrate_common.h"
+typedef struct {
+    float x;
+    float y;
+    float z;
+} vector_3f_t;
+
+typedef struct {
+    vector_3f_t acceleration;
+    vector_3f_t gyroscope;
+    float temperature;
+} mpu6050_measures_t;
 
 /**
  * @brief Registra un nuevo MPU6050 y lo configura con senstividad por default. Finalmente, despierta
@@ -38,6 +48,6 @@ esp_err_t mpu6050_free_resources(bool also_delete_i2c_driver);
 /**
  * @brief Lee las mediciones del acelerómetro, giroscopio y termómetro del MPU6050.
  */
-esp_err_t mpu6050_get_measurements(sensor_measures_t* const out_measurements);
+esp_err_t mpu6050_get_measurements(mpu6050_measures_t* const out_measurements);
 
 #endif /* _MPU6050_SENSOR_H_ */

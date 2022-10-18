@@ -107,6 +107,8 @@ static esp_err_t sample_adc(uint32_t* out_voltage_mv, size_t num_samples)
             adc2_get_raw((adc2_channel_t) bat_level_channel, bit_width, &raw);
             adc_reading += raw;
         }
+
+        ESP_LOGI(TAG, "ADC%d aggregated voltage: %d mV / %d", ADC_UNIT_1 + 1, adc_reading, num_samples);
     }
 
     adc_reading /= num_samples;

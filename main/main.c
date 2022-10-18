@@ -30,17 +30,19 @@ static const char* TAG = "MAIN";
 #define MAX_SYNC_QUEUE_LEN 5
 #define BATTERY_LVL_QUEUE_SIZE 1
 
-#define NUM_SENSOR_MEASURES_PER_SECOND 4
+#define NUM_SENSOR_MEASURES_PER_SECOND 5
 #define MAX_SENSOR_DATA_BUF_SECONDS 5
 #define MAX_SENSOR_DATA_BUF_LEN MAX_SENSOR_DATA_BUF_SECONDS * NUM_SENSOR_MEASURES_PER_SECOND
-#define MAX_SENSOR_DATA_QUEUE_LEN 10
+#define MAX_MPU6050_DATA_QUEUE_LEN 10
+#define MAX_HX711_DATA_QUEUE_LEN 1
 
 #define RECORD_RECEIVE_TIMEOUT_MS 500
 #define NUM_BATTERY_CHARGE_SAMPLES 5
 
 static QueueHandle_t xStorageQueue = NULL;
 static QueueHandle_t xSyncQueue = NULL;
-static QueueHandle_t xSensorDataQueue = NULL;
+static QueueHandle_t xMpu6050DataQueue = NULL;
+static QueueHandle_t xHx711DataQueue = NULL;
 static QueueHandle_t xBatteryLevelQueue = NULL;
 
 static const TickType_t power_management_period_ticks = pdMS_TO_TICKS(60 * 1000);
@@ -51,7 +53,8 @@ static esp_err_t battery_monitor_status = ESP_FAIL;
 static void storage_task(void* pvParameters);
 static void hydration_inference_task(void* pvParameters);
 static void communication_task(void* pvParameters);
-static void read_sensors_measurements_task(void* pvParameters);
+static void mpu6050_measurement_task(void* pvParameters);
+static void hx711_measurement_task(void* pvParameters);
 
 /* Callbacks de timers */
 static void battery_monitor_timer_callback(TimerHandle_t xTimer);
@@ -60,6 +63,7 @@ static void power_management_timer_callback(TimerHandle_t xTimer);
 /* Funciones de utilidad */
 static esp_err_t send_record_to_sync(const hydration_record_t* hydrationRecord, bool* sentToStorage);
 static void init_power_management(void);
+static void init_battery_monitoring(void);
 static esp_err_t global_setup(void);
 
 /* Main app entry point */
@@ -75,8 +79,14 @@ void app_main(void)
         xTaskCreatePinnedToCore(storage_task, "storage_task", 2048, NULL, 3, NULL, APP_CPU_NUM);
         xTaskCreatePinnedToCore(hydration_inference_task, "hydr_infer_task", 2048, NULL, 3, NULL, APP_CPU_NUM);
         xTaskCreatePinnedToCore(communication_task, "comm_sync_task", 4096, NULL, 4, NULL, APP_CPU_NUM);
-        xTaskCreatePinnedToCore(read_sensors_measurements_task, "meas_sensors_task", 2048, NULL, 3, NULL, APP_CPU_NUM);
+        xTaskCreatePinnedToCore(mpu6050_measurement_task, "meas_mpu6050_task", 2048, NULL, 3, NULL, APP_CPU_NUM);
+        xTaskCreatePinnedToCore(hx711_measurement_task, "meas_hx711_task", 2048, NULL, 3, NULL, APP_CPU_NUM);
 
+    } else if (ESP_ERR_NO_MEM == setup_status) {
+        ESP_LOGW(
+            TAG, 
+            "Uno o mas objetos de FreeRTOS no pudo ser creado. Asegura que haya memoria disponible en heap."
+        );
     } else {
         ESP_LOGE(
             TAG, 
@@ -276,7 +286,7 @@ static void storage_task(void* pvParameters)
 
 static void hydration_inference_task(void* pvParameters) 
 {
-    int32_t numRecordsSentForSync = 0;
+    int32_t num_of_records_sent_for_sync = 0;
     int32_t numRecordsSentForStorage = 0; 
 
     static const TickType_t waitForReadingsTimeoutMs = pdMS_TO_TICKS(10000);
@@ -287,16 +297,24 @@ static void hydration_inference_task(void* pvParameters)
 
     while (true) 
     {
-        BaseType_t measurementsWereReceived = xQueueReceive(
-            xSensorDataQueue,
-            &readingsBuffer[indexOfLatestSensorReadings],
+        BaseType_t mpu6050_measurements_received = xQueueReceive(
+            xMpu6050DataQueue,
+            &(readingsBuffer[indexOfLatestSensorReadings].accel_gyro_measurements),
             waitForReadingsTimeoutMs
         );
 
-        measurementsWereReceived = pdPASS;
+        BaseType_t hx711_data_available = xQueuePeek(
+            xHx711DataQueue,
+            &(readingsBuffer[indexOfLatestSensorReadings].weight_measurements),
+            (TickType_t) 0
+        );
 
-        if (measurementsWereReceived) 
+        bool sensor_measurements_available = pdPASS == hx711_data_available && pdPASS == mpu6050_measurements_received;
+
+        if (sensor_measurements_available) 
         {
+            record_measurements_timestamp(&readingsBuffer[indexOfLatestSensorReadings]);
+
             hydration_record_t hydrationRecord = {};
             
             // Algoritmo para determinar si las mediciones en readingsBuffer
@@ -336,11 +354,11 @@ static void hydration_inference_task(void* pvParameters)
                         ++numRecordsSentForStorage;
                     } else 
                     {
-                        ++numRecordsSentForSync;
+                        ++num_of_records_sent_for_sync;
                     }
                 }
 
-                int32_t totalRecordsSent = numRecordsSentForStorage + numRecordsSentForSync;
+                int32_t totalRecordsSent = numRecordsSentForStorage + num_of_records_sent_for_sync;
 
                 if (ESP_OK == status) 
                 {
@@ -500,30 +518,25 @@ static void communication_task(void* pvParameters)
     vTaskDelete(NULL);
 }
 
-static void read_sensors_measurements_task(void* pvParameters) 
+static void mpu6050_measurement_task(void* pvParameters) 
 {
     static TickType_t measurementIntervalMs = pdMS_TO_TICKS(1000 / NUM_SENSOR_MEASURES_PER_SECOND);
-    static const TickType_t batteryMeasurePeriodMs = pdMS_TO_TICKS(10 * 1000);
+    static TickType_t mpu6050_init_retry_timeout_ms = 1000;
 
-    static hx711_t hx711_sensor = {
-        .data_out = CONFIG_HX711_DATA_OUT_GPIO,
-        .pd_sck = CONFIG_HX711_PD_SCK_GPIO,
-        .gain = HX711_GAIN_A_64
-    };
+    esp_err_t mpu6050_init_status = ESP_FAIL;
 
-    esp_err_t hx711_init_status = ESP_OK;
-    esp_err_t mpu6050_init_status = ESP_OK;
-    esp_err_t hx711_read_status = ESP_OK;
-    esp_err_t mpu6050_read_status = ESP_OK;
+    while (ESP_OK != mpu6050_init_status)
+    {
+        mpu6050_init_status = mpu6050_init(true);
 
-    // Inicializar los sensores.
-    hx711_init_status = hx711_init(&hx711_sensor);
-    mpu6050_init_status = mpu6050_init(true);
-    battery_monitor_status = battery_monitor_init();
+        if (ESP_OK != mpu6050_init_status) 
+        {
+            ESP_LOGW(TAG, "Error de inicializacion de MPU6050 (%s), reintentando en %.2fs", esp_err_to_name(mpu6050_init_status), mpu6050_init_retry_timeout_ms / 1000.0f);
+            vTaskDelay(pdMS_TO_TICKS(mpu6050_init_retry_timeout_ms));
+        }
+    }
 
-    ESP_LOGI(TAG, "HX711 sensor status (%s)", esp_err_to_name(hx711_init_status));
     ESP_LOGI(TAG, "MPU6050 sensor status (%s)", esp_err_to_name(mpu6050_init_status));
-    ESP_LOGI(TAG, "Battery monitor status (%s)", esp_err_to_name(battery_monitor_status));
 
     if (ESP_OK == mpu6050_init_status)
     {
@@ -532,40 +545,87 @@ static void read_sensors_measurements_task(void* pvParameters)
         ESP_LOGI(TAG, "MPU6050 sensor device ID = %2x", mpu6050_deviceid);
     }
 
-    TimerHandle_t xBatteryLevelTimer = xTimerCreate(
-        "battery_level_timer",
-        batteryMeasurePeriodMs,
-        pdTRUE,
-        NULL,
-        battery_monitor_timer_callback
-    );
+    esp_err_t mpu6050_read_status = ESP_OK;
+    mpu6050_measures_t mpu6050_data = {};
 
-    // Comenzar el timer periodico para obtener mediciones del
-    // nivel de bateria.
-    xTimerStart(xBatteryLevelTimer, (TickType_t) 0);
-
-    while (true) {
-        // Obtener lecturas de los sensores.
-        sensor_measures_t sensor_data = {};
-
-        if (ESP_OK == hx711_init_status && ESP_OK == mpu6050_init_status) 
+    while (true) 
+    {
+        if (ESP_OK == mpu6050_init_status) 
         {
-            start_measurement_period(&sensor_data);
-        } 
+            // Obtener mediciones del MPU6050.
+            mpu6050_read_status = mpu6050_get_measurements(&mpu6050_data);
 
-        if (ESP_OK == hx711_init_status) 
+            if (ESP_OK != mpu6050_read_status) 
+            {
+                ESP_LOGW(TAG, "Error obtaining data from MPU6050 (%s)", esp_err_to_name(mpu6050_read_status));
+            }
+        }
+
+        if (ESP_OK == mpu6050_read_status && NULL != xMpu6050DataQueue) 
         {
-            hx711_read_status = hx711_read_average(
-                &hx711_sensor, 
-                CONFIG_HX711_AVG_SAMPLES_COUNT, 
-                &sensor_data.raw_weight_data
+            ESP_LOGI(
+                TAG, 
+                "Lecturas de sensores: { accel: (%.2f, %.2f, %.2f), gyro: (%.2f, %.2f, %.2f), temp: %.2f }", 
+                mpu6050_data.acceleration.x, mpu6050_data.acceleration.y, mpu6050_data.acceleration.z, 
+                mpu6050_data.gyroscope.x, mpu6050_data.gyroscope.y, mpu6050_data.gyroscope.z, 
+                mpu6050_data.temperature
             );
 
-            if (ESP_OK == hx711_read_status)
-            {
-                uint16_t volume_ml = hx711_volume_ml_from_measurement(&sensor_data.raw_weight_data);
-                sensor_data.volume_ml = volume_ml;
+            BaseType_t dataWasSent = xQueueSendToBack(
+                xMpu6050DataQueue,
+                &mpu6050_data,
+                (TickType_t) 0
+            );
+
+            if (!dataWasSent) {
+                ESP_LOGW(TAG, "Las lecturas de los sensores no pudieron ser enviadas");
             }
+        } else {
+            ESP_LOGW(TAG, "Something went wrong while getting sensor readings (mpu6050 %s) (xMpu6050DataQueue != NULL ? %d)", esp_err_to_name(mpu6050_read_status), (xMpu6050DataQueue != NULL));
+        }
+
+        vTaskDelay(measurementIntervalMs);
+    }
+
+    mpu6050_free_resources(true);
+
+    vTaskDelete(NULL);
+}
+
+static void hx711_measurement_task(void* pvParameters)
+{
+    static const TickType_t hx711_measure_period_ticks = pdMS_TO_TICKS(500);
+    static const uint32_t sensor_init_retry_period_ms = 1000;
+    static const size_t hx711_read_timeout_ms = 125;
+
+    static hx711_t hx711_sensor = {
+        .data_out = CONFIG_HX711_DATA_OUT_GPIO,
+        .pd_sck = CONFIG_HX711_PD_SCK_GPIO,
+        .gain = HX711_GAIN_A_64
+    };
+
+    esp_err_t hx711_init_status = ESP_FAIL;
+
+    while (ESP_OK != hx711_init_status)
+    {
+        hx711_init_status = hx711_init(&hx711_sensor);
+
+        if (ESP_OK != hx711_init_status)
+        {
+            ESP_LOGI(TAG, "HX711 sensor status (%s)", esp_err_to_name(hx711_init_status));
+            vTaskDelay(pdMS_TO_TICKS(sensor_init_retry_period_ms));
+        }
+    }
+
+    esp_err_t hx711_read_status = ESP_FAIL;
+    hx711_measures_t hx711_measurement = {};
+
+    while (true)
+    {
+        if (ESP_OK == hx711_init_status) 
+        {
+            hx711_read_status = hx711_get_measurements(&hx711_sensor, &hx711_measurement, hx711_read_timeout_ms);
+
             if (ESP_ERR_TIMEOUT == hx711_read_status) 
             {
                 ESP_LOGW(TAG, "HX711 data read timeout");
@@ -575,57 +635,25 @@ static void read_sensors_measurements_task(void* pvParameters)
             }
         } 
 
-        if (ESP_OK == mpu6050_init_status) 
-        {
-            // Obtener mediciones del MPU6050.
-            mpu6050_read_status = mpu6050_get_measurements(&sensor_data);
-
-            if (ESP_OK != mpu6050_read_status) 
-            {
-                ESP_LOGW(TAG, "Error obtaining data from MPU6050 (%s)", esp_err_to_name(mpu6050_read_status));
-            }
-        }
-
-        if (ESP_OK == hx711_init_status && ESP_OK == mpu6050_init_status) 
-        {
-            end_measurement_period(&sensor_data);
-        } 
-
-        if (ESP_OK == hx711_read_status && ESP_OK == mpu6050_read_status && NULL != xSensorDataQueue) 
+        if (ESP_OK == hx711_read_status && NULL != xHx711DataQueue)
         {
             ESP_LOGI(
                 TAG, 
-                "Lecturas de sensores: { raw_weight: %i, volume: %uml, accel: (%.2f, %.2f, %.2f), gyro: (%.2f, %.2f, %.2f), temp: %.2f, interval:%lld-%lld ms}", 
-                sensor_data.raw_weight_data,
-                sensor_data.volume_ml,
-                sensor_data.acceleration.x, sensor_data.acceleration.y, sensor_data.acceleration.z, 
-                sensor_data.gyroscope.x, sensor_data.gyroscope.y, sensor_data.gyroscope.z, 
-                sensor_data.temperature,
-                sensor_data.start_time_ms,
-                sensor_data.end_time_ms
+                "Mediciones del HX711: { raw_weight: %i, volume: %uml }", 
+                hx711_measurement.raw_weight,
+                hx711_measurement.volume_ml
             );
 
-            BaseType_t dataWasSent = xQueueSendToBack(
-                xSensorDataQueue,
-                &sensor_data,
-                (TickType_t) 0
-            );
+            BaseType_t dataWasSent = xQueueOverwrite(xHx711DataQueue, &hx711_measurement);
 
-            if (!dataWasSent) {
-                ESP_LOGW(TAG, "Las lecturas de los sensores no pudieron ser enviadas");
+            if (!dataWasSent) 
+            {
+                ESP_LOGW(TAG, "Las mediciones del HX711 no pudieron ser escritas en xHx711DataQueue.");
             }
-        } else {
-            ESP_LOGW(TAG, "Something went wrong while getting sensor readings (hx711 %s) (mpu6050 %s) (xSensorDataQueue != NULL ? %d)", esp_err_to_name(hx711_read_status), esp_err_to_name(mpu6050_read_status), (xSensorDataQueue != NULL));
         }
 
-        vTaskDelay(measurementIntervalMs);
+        vTaskDelay(hx711_measure_period_ticks);
     }
-
-    // Liberar recursos
-    xTimerStop(xBatteryLevelTimer, (TickType_t) 0);
-
-    hx711_set_power(&hx711_sensor, true);
-    mpu6050_free_resources(true);
 
     vTaskDelete(NULL);
 }
@@ -655,71 +683,111 @@ static void power_management_timer_callback(TimerHandle_t xTimer)
 {
     ESP_LOGI(TAG, "Preparing for deep sleep");
 
-    begin_deep_sleep_when_ready();
+    // begin_deep_sleep_when_ready();
 }
 
 static void init_power_management(void) 
 {
     after_wakeup();
 
-    xTimerCreate(
+    TimerHandle_t power_mgmt_timer_handle = xTimerCreate(
         "power_management_timer",
         power_management_period_ticks,
         pdTRUE,
         NULL,
         power_management_timer_callback
     );
+
+    if (NULL != power_mgmt_timer_handle)
+    {
+        xTimerStart(power_mgmt_timer_handle, pdMS_TO_TICKS(100));
+
+    } else {
+        ESP_LOGW(TAG, "Error al crear timer para manejo de energia. Revisa que exista suficiente memoria en heap.");
+    }
+
+}
+
+static void init_battery_monitoring(void)
+{
+    static const TickType_t batteryMeasurePeriodMs = pdMS_TO_TICKS(10 * 1000);
+
+    battery_monitor_status = battery_monitor_init();
+
+    ESP_LOGI(TAG, "Battery monitor status (%s)", esp_err_to_name(battery_monitor_status));
+
+    TimerHandle_t xBatteryMonitorTimer = xTimerCreate(
+        "battery_level_timer",
+        batteryMeasurePeriodMs,
+        pdTRUE,
+        NULL,
+        battery_monitor_timer_callback
+    );
+
+    // Comenzar el timer periodico para obtener mediciones del
+    // nivel de bateria.
+    xTimerStart(xBatteryMonitorTimer, (TickType_t) 0);
 }
 
 static esp_err_t global_setup(void) 
 {
+    esp_err_t setup_status = ESP_OK;
     // Para fines de prueba, mostrar la memoria heap disponible.
-    ESP_LOGI(TAG, "Size minimo de heap libre (antes de setup()): %u bytes", esp_get_minimum_free_heap_size());
+    ESP_LOGI(TAG, "Size minimo de heap libre (antes de global_setup()): %u bytes", esp_get_minimum_free_heap_size());
 
-    ESP_LOGD(TAG, "Configurando power management");
-    init_power_management();
-
-    ESP_LOGD(TAG, "Inicializando NVS");
-
-    //NOTA: storage_init() está aquí porque si lo dejaba com oparte de 
-    // una task y otra task la interrumpía, la inicialización produce
-    // un LoadProhibited error. No estoy seguro sobre las implicaciones 
-    // que tiene el preempt con storage_init.
-    esp_err_t nvs_status = storage_init();
-    
-    if (ESP_OK != nvs_status)
+    if (ESP_OK == setup_status)
     {
-        ESP_LOGW(
-            TAG, 
-            "NVS no pudo ser inicializado"
-        );
-        return nvs_status;
+        ESP_LOGD(TAG, "Configurando power management");
+        init_power_management();
     }
 
-    // Inicializar los objetos de FreeRTOS usados para controlar 
-    // los procesos de almacenar y obtener registros de hidratación. 
-    ESP_LOGD(TAG, "Creando objetos de FreeRTOS");
-    xStorageQueue = xQueueCreate( MAX_RECORD_QUEUE_LEN, sizeof(hydration_record_t) );
-    xSyncQueue = xQueueCreate( MAX_SYNC_QUEUE_LEN, sizeof(hydration_record_t) );
-    xSensorDataQueue = xQueueCreate( MAX_SENSOR_DATA_QUEUE_LEN, sizeof(sensor_measures_t) );
-    xBatteryLevelQueue = xQueueCreate( BATTERY_LVL_QUEUE_SIZE, sizeof(battery_measurement_t) );
-
-    if (NULL == xStorageQueue || NULL == xSyncQueue || NULL == xSensorDataQueue || NULL == xBatteryLevelQueue) 
+    if (ESP_OK == setup_status)
     {
-        ESP_LOGW(
-            TAG, 
-            "Uno o mas objetos de FreeRTOS no pudo ser creado. Asegura que haya memoria disponible en heap."
-        );
-        return ESP_ERR_NO_MEM;
+        ESP_LOGD(TAG, "Configurando monitor de bateria");
+        init_battery_monitoring();
     }
 
-    // Configurar todos los pines de GPIO usados.
-    ESP_LOGD(TAG, "Configurando I/O");
+    if (ESP_OK == setup_status)
+    {
+        ESP_LOGD(TAG, "Inicializando NVS");
+
+        //NOTA: storage_init() está aquí porque si lo dejaba como parte de 
+        // una task y otra task la interrumpía, la inicialización produce
+        // un LoadProhibited error. No estoy seguro sobre las implicaciones 
+        // que tiene el preempt con storage_init.
+        esp_err_t nvs_status = storage_init();
+        
+        if (ESP_OK != nvs_status)
+        {
+            ESP_LOGW(
+                TAG, 
+                "NVS no pudo ser inicializado"
+            );
+            setup_status = nvs_status;
+        }
+    }
+
+    if (ESP_OK == setup_status)
+    {
+        // Inicializar los objetos de FreeRTOS usados para controlar 
+        // los procesos de almacenar y obtener registros de hidratación. 
+        ESP_LOGD(TAG, "Creando objetos de FreeRTOS");
+        xStorageQueue = xQueueCreate( MAX_RECORD_QUEUE_LEN, sizeof(hydration_record_t) );
+        xSyncQueue = xQueueCreate( MAX_SYNC_QUEUE_LEN, sizeof(hydration_record_t) );
+        xMpu6050DataQueue = xQueueCreate( MAX_MPU6050_DATA_QUEUE_LEN, sizeof(mpu6050_measures_t) );
+        xHx711DataQueue = xQueueCreate( MAX_HX711_DATA_QUEUE_LEN, sizeof(hx711_measures_t) );
+        xBatteryLevelQueue = xQueueCreate( BATTERY_LVL_QUEUE_SIZE, sizeof(battery_measurement_t) );
+
+        if (NULL == xStorageQueue || NULL == xSyncQueue || NULL == xMpu6050DataQueue || NULL == xHx711DataQueue|| NULL == xBatteryLevelQueue) 
+        {
+            setup_status = ESP_ERR_NO_MEM;
+        }
+    }
 
     // Para fines de prueba, mostrar la memoria heap disponible.
-    ESP_LOGI(TAG, "Size minimo de heap libre (despues de setup()): %u bytes", esp_get_minimum_free_heap_size());
+    ESP_LOGI(TAG, "Size minimo de heap libre (despues de global_setup()): %u bytes", esp_get_minimum_free_heap_size());
 
-    return ESP_OK;
+    return setup_status;
 }
 
 static esp_err_t send_record_to_sync(const hydration_record_t* hydrationRecord, bool* sentToStorage)

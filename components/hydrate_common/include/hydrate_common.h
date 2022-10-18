@@ -1,6 +1,9 @@
 #ifndef _HYDRATE_COMMON_H_
 #define _HYDRATE_COMMON_H_
 
+#include "hx711.h"
+#include "mpu6050_sensor.h"
+
 /**
  * @brief Contiene los datos básicos de un registro de 
  * hidratación.
@@ -12,30 +15,19 @@ typedef struct {
     int64_t timestamp;
 } hydration_record_t;
 
-typedef struct {
-    float x;
-    float y;
-    float z;
-} vector_3f_t;
-
 /**
  * @brief Contiene los datos obtenidos para un muestreo determinado de 
  * los sensores.
  */
 typedef struct {
-    int32_t raw_weight_data;
-    int32_t volume_ml;
-    vector_3f_t acceleration;
-    vector_3f_t gyroscope;
-    float temperature;
-    int64_t start_time_ms;
-    int64_t end_time_ms;
+    mpu6050_measures_t accel_gyro_measurements;
+    hx711_measures_t weight_measurements;
+    int64_t timestamp_ms;
 } sensor_measures_t;
 
 esp_err_t hydration_record_to_string(char* out_buf, const hydration_record_t* hydration_record);
 
-esp_err_t start_measurement_period(sensor_measures_t* measurement);
-esp_err_t end_measurement_period(sensor_measures_t* measurement);
+esp_err_t record_measurements_timestamp(sensor_measures_t* measurement);
 
 /**
  * @brief Determina si un conjunto de [sensor_measures_t] está asociado

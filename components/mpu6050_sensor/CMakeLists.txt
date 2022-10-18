@@ -1,5 +1,5 @@
 idf_component_register(
     SRCS "mpu6050_sensor.c"
     INCLUDE_DIRS "include"
-    REQUIRES mpu6050 hydrate_common
+    REQUIRES mpu6050
 )

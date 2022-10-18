@@ -116,7 +116,7 @@ esp_err_t mpu6050_free_resources(bool also_delete_i2c_driver)
     return status;
 }
 
-esp_err_t mpu6050_get_measurements(sensor_measures_t* const out_measurements)
+esp_err_t mpu6050_get_measurements(mpu6050_measures_t* const out_measurements)
 {
     esp_err_t status = ESP_OK; 
 

@@ -18,6 +18,11 @@ typedef struct {
     hx711_gain_t gain;
 } hx711_t;
 
+typedef struct {
+    int32_t raw_weight;
+    uint16_t volume_ml;
+} hx711_measures_t;
+
 esp_err_t hx711_init(hx711_t* device);
 
 esp_err_t hx711_set_power(hx711_t* device, bool down);
@@ -31,6 +36,8 @@ esp_err_t hx711_wait_for_data(hx711_t* device, size_t timeout_ms);
 esp_err_t hx711_read_data(hx711_t* device, int32_t* data);
 
 esp_err_t hx711_read_average(hx711_t* device, size_t num_samples, int32_t* data);
+
+esp_err_t hx711_get_measurements(hx711_t* device, hx711_measures_t* const out_measurements, size_t timeout_ms);
 
 esp_err_t hx711_calibrate(hx711_t* device);
 

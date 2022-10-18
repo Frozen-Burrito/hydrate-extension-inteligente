@@ -35,7 +35,7 @@ static int64_t latest_hydration_timestamp_ms = 0;
 // Utils
 static float constrain(float number, float min, float max);
 static int32_t index_of_oldest_measurement(const sensor_measures_t measurements[], const size_t measurement_count);
-static int64_t get_measurement_duration_ms(const sensor_measures_t* measures);
+// static int64_t get_measurement_duration_ms(const sensor_measures_t* measures);
 // static bool is_accel_maintained(mpu6050_acce_value_t* previous, mpu6050_acce_value_t* current);
 
 esp_err_t hydration_record_to_string(char* out_buf, const hydration_record_t* hydration_record)
@@ -56,7 +56,7 @@ esp_err_t hydration_record_to_string(char* out_buf, const hydration_record_t* hy
     return ESP_OK;
 }
 
-esp_err_t start_measurement_period(sensor_measures_t* measurement)
+esp_err_t record_measurements_timestamp(sensor_measures_t* measurement)
 {
     if (NULL == measurement) 
     {
@@ -68,22 +68,7 @@ esp_err_t start_measurement_period(sensor_measures_t* measurement)
 
     int64_t millis = (((int64_t) now.tv_sec) * 1000) + (((int64_t) now.tv_usec) / 1000);
     ESP_LOGD(TAG, "Millis since UNIX epoch: %lld", millis);
-    measurement->start_time_ms = millis;
-
-    return ESP_OK;
-}
-
-esp_err_t end_measurement_period(sensor_measures_t* measurement)
-{
-    if (NULL == measurement) 
-    {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    struct timeval now;
-    gettimeofday(&now, NULL);
-
-    measurement->end_time_ms = (((int64_t) now.tv_sec) * 1000) + (((int64_t) now.tv_usec) / 1000);
+    measurement->timestamp_ms = millis;
 
     return ESP_OK;
 }
@@ -92,14 +77,14 @@ bool hydration_record_from_measures(const sensor_measures_t measurements[], cons
 {
     if (NULL == measurements || 0 == measurement_count || NULL == out_record)
     {
-        return ESP_ERR_INVALID_ARG;
+        return false;
     }
 
     int32_t oldest_measurement_index = index_of_oldest_measurement(measurements, measurement_count);
 
     // Verificar si ya sea ha registrado consumo de agua en los últimos x segundos.
     // si es así, no es posible que el usuario esté tomando agua nuevamente.
-    bool hydration_already_recorded = (measurements[oldest_measurement_index].start_time_ms) < (latest_hydration_timestamp_ms + hydration_cooldown_ms);
+    bool hydration_already_recorded = (measurements[oldest_measurement_index].timestamp_ms) < (latest_hydration_timestamp_ms + hydration_cooldown_ms);
 
     if (hydration_already_recorded)
     {
@@ -127,8 +112,7 @@ bool hydration_record_from_measures(const sensor_measures_t measurements[], cons
         const sensor_measures_t* current_measurement = &measurements[record_index];
         const sensor_measures_t* next_measurement = &measurements[(record_index + 1) % measurement_count];
 
-        int64_t time_before_next_measurement_ms = next_measurement->start_time_ms - current_measurement->end_time_ms; 
-        const int64_t measurement_duration_ms = get_measurement_duration_ms(current_measurement) + time_before_next_measurement_ms;
+        const int64_t measurement_duration_ms = next_measurement->timestamp_ms - current_measurement->timestamp_ms; 
 
         //TODO: determinar si la aceleracion es mantenida inicialmente, cambia, y luego vuelve a ser mantenida
 
@@ -137,23 +121,23 @@ bool hydration_record_from_measures(const sensor_measures_t measurements[], cons
         // Verificar la diferencia de peso. Para representar un consumo de agua, 
         // debería cambiar una sola vez a lo largo de measurements y tener un delta
         // positivo (si es negativo, significa que aumentó el volumen total?).
-        if (current_measurement->raw_weight_data > lifted_raw_weight) 
+        if (current_measurement->weight_measurements.raw_weight > lifted_raw_weight) 
         {
             if (lifted_duration_ms <= 0) 
             {
                 start_stationary_duration_ms += measurement_duration_ms;
-                initial_volume_ml = current_measurement->volume_ml;
+                initial_volume_ml = current_measurement->weight_measurements.volume_ml;
             } else
             {
                 end_stationary_duration_ms += measurement_duration_ms;
-                final_volume_ml = current_measurement->volume_ml;
+                final_volume_ml = current_measurement->weight_measurements.volume_ml;
             }
         } else 
         {
             lifted_duration_ms += measurement_duration_ms;
         }
 
-        temperature_accumulator += constrain(current_measurement->temperature, min_temperature_celsius, max_temperature_celsius);
+        temperature_accumulator += constrain(current_measurement->accel_gyro_measurements.temperature, min_temperature_celsius, max_temperature_celsius);
 
         ++measures_in_hydration_record;
         record_index = (record_index + 1) % measurement_count;
@@ -175,7 +159,7 @@ bool hydration_record_from_measures(const sensor_measures_t measurements[], cons
         float temperature_celsius = temperature_accumulator / measures_in_hydration_record;
         out_record->temperature = (int16_t) temperature_celsius * 100;
 
-        latest_hydration_timestamp_ms = measurements[oldest_measurement_index].start_time_ms;
+        latest_hydration_timestamp_ms = measurements[oldest_measurement_index].timestamp_ms;
         out_record->timestamp = latest_hydration_timestamp_ms * 1000;
     }
 
@@ -185,14 +169,14 @@ bool hydration_record_from_measures(const sensor_measures_t measurements[], cons
 static int32_t index_of_oldest_measurement(const sensor_measures_t measurements[], const size_t measurement_count)
 {
     int32_t index = -1;
-    int64_t oldest_start_time_ms = INT64_MAX;
+    int64_t oldest_timestamp_ms = INT64_MAX;
 
     for (int32_t i = 0; i < measurement_count; ++i)
     {
-        if (measurements[i].start_time_ms < oldest_start_time_ms)
+        if (measurements[i].timestamp_ms < oldest_timestamp_ms)
         {
             index = i;
-            oldest_start_time_ms = measurements[i].start_time_ms;
+            oldest_timestamp_ms = measurements[i].timestamp_ms;
         }
     }
 
@@ -207,7 +191,6 @@ static float constrain(float number, float min, float max)
         max = temp;
     }
 
-
     if (number > max) {
         return max;
     } else if (number < min) {
@@ -217,12 +200,12 @@ static float constrain(float number, float min, float max)
     }
 }
 
-static int64_t get_measurement_duration_ms(const sensor_measures_t* measures)
-{
-    int64_t duration_ms = abs(measures->end_time_ms - measures->start_time_ms);
+// static int64_t get_measurement_duration_ms(const sensor_measures_t* measures)
+// {
+//     int64_t duration_ms = abs(measures->end_time_ms - measures->start_time_ms);
 
-    return duration_ms;
-}
+//     return duration_ms;
+// }
 
 // static bool is_accel_maintained(mpu6050_acce_value_t* previous, mpu6050_acce_value_t* current)
 // {
