@@ -47,89 +47,43 @@ static const TickType_t power_management_period_ticks = pdMS_TO_TICKS(60 * 1000)
 
 static esp_err_t battery_monitor_status = ESP_FAIL;
 
-static esp_err_t send_record_to_sync(const hydration_record_t* hydrationRecord, bool* sentToStorage)
+/* Tasks de FreeRTOS */
+static void storage_task(void* pvParameters);
+static void hydration_inference_task(void* pvParameters);
+static void communication_task(void* pvParameters);
+static void read_sensors_measurements_task(void* pvParameters);
+
+/* Callbacks de timers */
+static void battery_monitor_timer_callback(TimerHandle_t xTimer);
+static void power_management_timer_callback(TimerHandle_t xTimer);
+
+/* Funciones de utilidad */
+static esp_err_t send_record_to_sync(const hydration_record_t* hydrationRecord, bool* sentToStorage);
+static void init_power_management(void);
+static esp_err_t global_setup(void);
+
+/* Main app entry point */
+void app_main(void)
 {
-    if (NULL == hydrationRecord || NULL == sentToStorage) 
+    esp_err_t setup_status = global_setup();
+
+    if (ESP_OK == setup_status) 
     {
-        return ESP_ERR_INVALID_ARG;
-    }
+        // Esperar un momento para evitar reinicios inmediatos cuando existe un error (solo desarrollo).
+        vTaskDelay(pdMS_TO_TICKS(STARTUP_DELAY_MS));
 
-    static const TickType_t genWaitForSpaceTimeoutMs = pdMS_TO_TICKS(50);
+        xTaskCreatePinnedToCore(storage_task, "storage_task", 2048, NULL, 3, NULL, APP_CPU_NUM);
+        xTaskCreatePinnedToCore(hydration_inference_task, "hydr_infer_task", 2048, NULL, 3, NULL, APP_CPU_NUM);
+        xTaskCreatePinnedToCore(communication_task, "comm_sync_task", 4096, NULL, 4, NULL, APP_CPU_NUM);
+        xTaskCreatePinnedToCore(read_sensors_measurements_task, "meas_sensors_task", 2048, NULL, 3, NULL, APP_CPU_NUM);
 
-    // Si xBleConnectionStatus(CONNECTED_BIT) esta set, enviar el registro
-    // directamente a la queue de sincronziacion BLE. Si no es asi, 
-    // enviar el registro a la queue de almacenamiento.
-    ble_status_t connectionStatus = ble_wait_for_state(PAIRED, true, 0);
-
-    char strRegistroHidratacion[100] = {};
-    hydration_record_to_string(strRegistroHidratacion, hydrationRecord);
-
-    ESP_LOGI(TAG, "%s", strRegistroHidratacion);
-
-    esp_err_t status = ESP_OK;
-        
-    if (PAIRED == connectionStatus) {
-        // Intentar enviar el registro de hidratación generado a ser  
-        // sincronizado o almacenado. Si la queue está full, esperar por
-        // genWaitForSpaceTimeoutMs ms a que se libere espacio. 
-        BaseType_t queueSendResult = xQueueSendToBack( 
-            xSyncQueue, 
-            (void*) hydrationRecord,
-            genWaitForSpaceTimeoutMs
-        );
-
-        if (queueSendResult == errQUEUE_FULL) {
-            status = ESP_ERR_NO_MEM;
-        }
     } else {
-        // Intentar enviar el registro de hidratación generado a ser  
-        // sincronizado o almacenado. Si la queue está full, esperar por
-        // genWaitForSpaceTimeoutMs ms a que se libere espacio. 
-        BaseType_t queueSendResult = xQueueSendToBack( 
-            xStorageQueue, 
-            (void*) hydrationRecord,
-            genWaitForSpaceTimeoutMs
+        ESP_LOGE(
+            TAG, 
+            "Error al inicializar app usando global_setup() (%s)", 
+            esp_err_to_name(setup_status)
         );
-
-        if (queueSendResult == errQUEUE_FULL) {
-            status = ESP_ERR_NO_MEM;
-        }
     }
-
-    if (ESP_OK == status)
-    {
-        *sentToStorage = !(PAIRED == connectionStatus);
-    }
-
-    return status;
-}
-
-static void battery_monitor_timer_callback(TimerHandle_t xTimer) 
-{
-    battery_measurement_t battery_measurement = {};
-
-    if (ESP_OK != battery_monitor_status) 
-    {
-        // Si el sensor de batería no está en un estado correcto, intentar
-        // re-inicializarlo.
-        battery_monitor_status = battery_monitor_init();
-    }
-
-    esp_err_t measure_status = multi_sample_battery_level(&battery_measurement, NUM_BATTERY_CHARGE_SAMPLES);
-
-    if (ESP_OK == measure_status) 
-    {
-        xQueueOverwrite(xBatteryLevelQueue, &battery_measurement);
-
-        ESP_LOGI(TAG, "Carga restante de la bateria: %d%%", battery_measurement.remaining_charge);
-    }
-} 
-
-static void power_management_timer_callback(TimerHandle_t xTimer) 
-{
-    ESP_LOGI(TAG, "Preparing for deep sleep");
-
-    begin_deep_sleep_when_ready();
 }
 
 static void storage_task(void* pvParameters) 
@@ -320,7 +274,7 @@ static void storage_task(void* pvParameters)
     vTaskDelete(NULL);
 }
 
-static void record_generator_task(void* pvParameters) 
+static void hydration_inference_task(void* pvParameters) 
 {
     int32_t numRecordsSentForSync = 0;
     int32_t numRecordsSentForStorage = 0; 
@@ -676,7 +630,35 @@ static void read_sensors_measurements_task(void* pvParameters)
     vTaskDelete(NULL);
 }
 
-static void setup_power_management(void) 
+static void battery_monitor_timer_callback(TimerHandle_t xTimer) 
+{
+    battery_measurement_t battery_measurement = {};
+
+    if (ESP_OK != battery_monitor_status) 
+    {
+        // Si el sensor de batería no está en un estado correcto, intentar
+        // re-inicializarlo.
+        battery_monitor_status = battery_monitor_init();
+    }
+
+    esp_err_t measure_status = multi_sample_battery_level(&battery_measurement, NUM_BATTERY_CHARGE_SAMPLES);
+
+    if (ESP_OK == measure_status) 
+    {
+        xQueueOverwrite(xBatteryLevelQueue, &battery_measurement);
+
+        ESP_LOGI(TAG, "Carga restante de la bateria: %d%%", battery_measurement.remaining_charge);
+    }
+} 
+
+static void power_management_timer_callback(TimerHandle_t xTimer) 
+{
+    ESP_LOGI(TAG, "Preparing for deep sleep");
+
+    begin_deep_sleep_when_ready();
+}
+
+static void init_power_management(void) 
 {
     after_wakeup();
 
@@ -689,13 +671,13 @@ static void setup_power_management(void)
     );
 }
 
-static esp_err_t setup(void) 
+static esp_err_t global_setup(void) 
 {
     // Para fines de prueba, mostrar la memoria heap disponible.
     ESP_LOGI(TAG, "Size minimo de heap libre (antes de setup()): %u bytes", esp_get_minimum_free_heap_size());
 
     ESP_LOGD(TAG, "Configurando power management");
-    setup_power_management();
+    init_power_management();
 
     ESP_LOGD(TAG, "Inicializando NVS");
 
@@ -740,26 +722,59 @@ static esp_err_t setup(void)
     return ESP_OK;
 }
 
-void app_main(void)
+static esp_err_t send_record_to_sync(const hydration_record_t* hydrationRecord, bool* sentToStorage)
 {
-    esp_err_t setup_status = setup();
-
-    if (ESP_OK == setup_status) 
+    if (NULL == hydrationRecord || NULL == sentToStorage) 
     {
-        // Dar tiempo para reaccionar si el módulo se reinicia.
-        vTaskDelay(pdMS_TO_TICKS(STARTUP_DELAY_MS));
-
-        // Crear tasks para que sean ejecutadas.
-        xTaskCreatePinnedToCore(storage_task, "storage task", 2048, NULL, 3, NULL, APP_CPU_NUM);
-        xTaskCreatePinnedToCore(record_generator_task, "generator task", 2048, NULL, 3, NULL, APP_CPU_NUM);
-        xTaskCreatePinnedToCore(communication_task, "communication and sync task", 4096, NULL, 4, NULL, APP_CPU_NUM);
-        xTaskCreatePinnedToCore(read_sensors_measurements_task, "read sensors task", 2048, NULL, 3, NULL, APP_CPU_NUM);
-
-    } else {
-        ESP_LOGE(
-            TAG, 
-            "Error al inicializar app usando setup() (%s)", 
-            esp_err_to_name(setup_status)
-        );
+        return ESP_ERR_INVALID_ARG;
     }
+
+    static const TickType_t genWaitForSpaceTimeoutMs = pdMS_TO_TICKS(50);
+
+    // Si xBleConnectionStatus(CONNECTED_BIT) esta set, enviar el registro
+    // directamente a la queue de sincronziacion BLE. Si no es asi, 
+    // enviar el registro a la queue de almacenamiento.
+    ble_status_t connectionStatus = ble_wait_for_state(PAIRED, true, 0);
+
+    char strRegistroHidratacion[100] = {};
+    hydration_record_to_string(strRegistroHidratacion, hydrationRecord);
+
+    ESP_LOGI(TAG, "%s", strRegistroHidratacion);
+
+    esp_err_t status = ESP_OK;
+        
+    if (PAIRED == connectionStatus) {
+        // Intentar enviar el registro de hidratación generado a ser  
+        // sincronizado o almacenado. Si la queue está full, esperar por
+        // genWaitForSpaceTimeoutMs ms a que se libere espacio. 
+        BaseType_t queueSendResult = xQueueSendToBack( 
+            xSyncQueue, 
+            (void*) hydrationRecord,
+            genWaitForSpaceTimeoutMs
+        );
+
+        if (queueSendResult == errQUEUE_FULL) {
+            status = ESP_ERR_NO_MEM;
+        }
+    } else {
+        // Intentar enviar el registro de hidratación generado a ser  
+        // sincronizado o almacenado. Si la queue está full, esperar por
+        // genWaitForSpaceTimeoutMs ms a que se libere espacio. 
+        BaseType_t queueSendResult = xQueueSendToBack( 
+            xStorageQueue, 
+            (void*) hydrationRecord,
+            genWaitForSpaceTimeoutMs
+        );
+
+        if (queueSendResult == errQUEUE_FULL) {
+            status = ESP_ERR_NO_MEM;
+        }
+    }
+
+    if (ESP_OK == status)
+    {
+        *sentToStorage = !(PAIRED == connectionStatus);
+    }
+
+    return status;
 }
