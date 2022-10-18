@@ -27,8 +27,8 @@ static size_t num_of_modules_requiring_shutdown = 0;
 static TickType_t await_modules_before_sleep_timeout = pdMS_TO_TICKS(5000);
 
 // ULP
-extern const uint8_t ulp_main_bin_start[] asm("_binary_ulp_motion_detect_bin_start");
-extern const uint8_t ulp_main_bin_end[] asm("_binary_ulp_motion_detect_bin_end");
+extern const uint8_t ulp_main_bin_start[] asm("_binary_ulp_main_bin_start");
+extern const uint8_t ulp_main_bin_end[] asm("_binary_ulp_main_bin_end");
 
 static uint32_t ulp_wakeup_period_ms = 100;
 
@@ -73,6 +73,8 @@ esp_err_t after_wakeup(void)
         ESP_LOGI(TAG, "Sistema despertado de deep sleep, causa inesperada: %s", cause_name);
         break;
     }
+    
+    xReadyForDeepSleepEvents = xEventGroupCreate();
 
     return wakeup_status;
 }

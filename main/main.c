@@ -23,6 +23,7 @@
 #include "ble_common.h"
 #include "hx711.h"
 #include "battery_monitor.h"
+#include "power-manager.h"
 
 static const char* TAG = "MAIN";
 
@@ -51,7 +52,7 @@ static QueueHandle_t xSyncQueue = NULL;
 static QueueHandle_t xSensorDataQueue = NULL;
 static QueueHandle_t xBatteryLevelQueue = NULL;
 
-static const TickType_t sleep_period_ticks = pdMS_TO_TICKS(60 * 1000);
+static const TickType_t power_management_period_ticks = pdMS_TO_TICKS(60 * 1000);
 
 static esp_err_t battery_monitor_status = ESP_FAIL;
 
@@ -132,6 +133,13 @@ static void battery_monitor_timer_callback(TimerHandle_t xTimer)
         ESP_LOGI(TAG, "Carga restante de la bateria: %d%%", battery_measurement.remaining_charge);
     }
 } 
+
+static void power_management_timer_callback(TimerHandle_t xTimer) 
+{
+    ESP_LOGI(TAG, "Preparing for deep sleep");
+
+    begin_deep_sleep_when_ready();
+}
 
 static esp_err_t i2c_bus_init(void) 
 {
@@ -745,10 +753,28 @@ static void read_sensors_measurements_task(void* pvParameters)
     vTaskDelete(NULL);
 }
 
+static void setup_power_management(void) 
+{
+    after_wakeup();
+
+    setup_wakeup_sources();
+
+    xTimerCreate(
+        "power_management_timer",
+        power_management_period_ticks,
+        pdTRUE,
+        NULL,
+        power_management_timer_callback
+    );
+}
+
 static esp_err_t setup(void) 
 {
     // Para fines de prueba, mostrar la memoria heap disponible.
     ESP_LOGI(TAG, "Size minimo de heap libre (antes de setup()): %u bytes", esp_get_minimum_free_heap_size());
+
+    ESP_LOGD(TAG, "Configurando power management");
+    // setup_power_management();
 
     ESP_LOGD(TAG, "Inicializando NVS");
 
