@@ -16,6 +16,7 @@ static const char* TAG = "POWER_MGMT";
 static RTC_DATA_ATTR struct timeval sleep_enter_time;
 
 static volatile bool has_configured_wakeup_sources = false;
+static volatile bool has_configured_timer_wakeup = false;
 
 static int32_t latest_sleep_duration_ms = 0;
 
@@ -23,8 +24,6 @@ static EventGroupHandle_t xReadyForDeepSleepEvents = NULL;
 
 static const char* modules_requiring_shutdown[MAX_MODULES_REQUIRING_SHUTDOWN] = {};
 static size_t num_of_modules_requiring_shutdown = 0;
-
-static TickType_t await_modules_before_sleep_timeout = pdMS_TO_TICKS(5000);
 
 // ULP
 extern const uint8_t ulp_main_bin_start[] asm("_binary_ulp_main_bin_start");
@@ -41,7 +40,7 @@ static void deinit_ulp_rtc_gpio(void);
 // Utilidades
 static void calculate_sleep_duration(void);
 static const char* wakeup_cause_to_name(const esp_sleep_wakeup_cause_t wakeup_cause);
-static size_t index_of_module_with_shutdown(const char* const module_tag);
+static int32_t index_of_module_with_shutdown(const char* const module_tag);
 
 esp_err_t after_wakeup(void)
 {
@@ -57,12 +56,16 @@ esp_err_t after_wakeup(void)
     {
     case ESP_SLEEP_WAKEUP_ULP:
         //TODO: manejar wakeups por ULP
-        ESP_LOGI(TAG, "Sistema despertado de deep sleep por ULP, tiempo en deep sleep: %d", latest_sleep_duration_ms);
+        ESP_LOGI(TAG, "Sistema despertado de deep sleep por ULP, tiempo en deep sleep: %dms", latest_sleep_duration_ms);
         wakeup_status = ESP_OK;
         break;
     case ESP_SLEEP_WAKEUP_EXT1:
         //TODO: manejo especifico de wakeups por EXT1
-        ESP_LOGI(TAG, "Sistema despertado de deep sleep por EXT1, tiempo en deep sleep: %d", latest_sleep_duration_ms);
+        ESP_LOGI(TAG, "Sistema despertado de deep sleep por EXT1, tiempo en deep sleep: %dms", latest_sleep_duration_ms);
+        wakeup_status = ESP_OK;
+        break;
+    case ESP_SLEEP_WAKEUP_TIMER:
+        ESP_LOGI(TAG, "Sistema despertado de deep sleep por timer, tiempo en deep sleep: %dms", latest_sleep_duration_ms);
         wakeup_status = ESP_OK;
         break;
     case ESP_SLEEP_WAKEUP_UNDEFINED:
@@ -87,36 +90,48 @@ esp_err_t after_wakeup(void)
     deinit_ulp_rtc_gpio();
     
     xReadyForDeepSleepEvents = xEventGroupCreate();
+    
+    if (NULL == xReadyForDeepSleepEvents)
+    {
+        ESP_LOGW(TAG, "The event group for shutdown notification could not be created");
+        wakeup_status = ESP_ERR_NO_MEM;
+    }
 
     return wakeup_status;
 }
 
-void begin_deep_sleep_when_ready()
+esp_err_t is_ready_for_deep_sleep(bool* const out_is_ready)
 {
-    if (!has_configured_wakeup_sources) 
+    if (NULL == out_is_ready)
     {
-        ESP_LOGW(TAG, "Se intento comenzar deep sleep sin antes haber configurado wakeup sources");
-        return;
+        return ESP_ERR_INVALID_ARG;
     }
 
-    EventBits_t resources_to_wait = 0x00;
+    if (NULL == xReadyForDeepSleepEvents)
+    {
+        return ESP_ERR_NO_MEM;
+    }
+
+    EventBits_t tasks_to_await_before_sleep = 0x00;
 
     for (size_t i = 0; i < num_of_modules_requiring_shutdown; ++i)
     {
-        resources_to_wait |= (1 << i);
+        tasks_to_await_before_sleep |= (1 << i);
     }
 
-    EventBits_t modules_ready_bits = xEventGroupWaitBits(
-        xReadyForDeepSleepEvents,
-        resources_to_wait,
-        pdTRUE,
-        pdTRUE,
-        await_modules_before_sleep_timeout
-    );
+    EventBits_t tasks_ready_for_sleep = xEventGroupGetBits(xReadyForDeepSleepEvents);
 
-    if (resources_to_wait != modules_ready_bits)
+    *out_is_ready = tasks_to_await_before_sleep == tasks_ready_for_sleep;
+
+    return ESP_OK;
+}
+
+void enter_deep_sleep()
+{
+    if (!(has_configured_wakeup_sources || has_configured_timer_wakeup)) 
     {
-        ESP_LOGW(TAG, "No todos los modulos estan listos para deep sleep, timeout.");
+        ESP_LOGW(TAG, "Se intento comenzar deep sleep sin antes haber configurado wakeup sources");
+        return;
     }
 
     ESP_LOGI(TAG, "Comenzando deep sleep");
@@ -180,16 +195,33 @@ esp_err_t setup_wakeup_sources(void)
     return setup_status;
 }
 
-esp_err_t add_module_for_deep_sleep_confirmation(const char* const module_tag)
+esp_err_t set_max_deep_sleep_duration(const int64_t sleep_duration_us)
 {
     esp_err_t status = ESP_OK;
 
-    size_t existing_module_idx = index_of_module_with_shutdown(module_tag);
+    if (ESP_OK == status) 
+    {
+        ESP_LOGI(TAG, "Activando wakeup por timer, periodo = %llius", sleep_duration_us);
+        status = esp_sleep_enable_timer_wakeup(sleep_duration_us);
+    }
+    
+    has_configured_timer_wakeup = (ESP_OK == status);
+
+    return status;
+}
+
+esp_err_t add_module_to_notify_before_deep_sleep(const char* const module_tag)
+{
+    esp_err_t status = ESP_OK;
+
+    int32_t existing_module_idx = index_of_module_with_shutdown(module_tag);
 
     if (existing_module_idx == -1) 
     {
         modules_requiring_shutdown[num_of_modules_requiring_shutdown] = module_tag;
+
         ++num_of_modules_requiring_shutdown;
+
     } else 
     {
         status = ESP_FAIL;
@@ -202,7 +234,7 @@ esp_err_t set_module_ready_for_deep_sleep(const char* const module_tag, bool is_
 {
     esp_err_t status = ESP_OK;
 
-    size_t existing_module_idx = index_of_module_with_shutdown(module_tag);
+    int32_t existing_module_idx = index_of_module_with_shutdown(module_tag);
     bool module_is_registered = existing_module_idx >= -1;
 
     if (module_is_registered) 
@@ -218,13 +250,14 @@ esp_err_t set_module_ready_for_deep_sleep(const char* const module_tag, bool is_
     return status;
 }
 
-static size_t index_of_module_with_shutdown(const char* const module_tag)
+static int32_t index_of_module_with_shutdown(const char* const module_tag)
 {
-    size_t index_of_module = -1;
+    int32_t index_of_module = -1;
 
-    for (size_t i = 0; i < num_of_modules_requiring_shutdown; ++i) 
+    for (int32_t i = 0; i < num_of_modules_requiring_shutdown; ++i) 
     {
         bool is_same_module = 0 == strcmp(module_tag, modules_requiring_shutdown[i]);
+
         if (is_same_module) 
         {
             index_of_module = i;

@@ -37,7 +37,7 @@ esp_err_t after_wakeup(void);
  * @brief Registra un módulo que necesita teardown antes de que el 
  * administrador de poder comience un sueño profundo.
  */ 
-esp_err_t add_module_for_deep_sleep_confirmation(const char* const module_tag);
+esp_err_t add_module_to_notify_before_deep_sleep(const char* const module_tag);
 
 /**
  * @brief Le indica al administrador de poder si el módulo identificado con
@@ -50,6 +50,20 @@ esp_err_t set_module_ready_for_deep_sleep(const char* const module_tag, bool is_
  * todos los módulos señalen que están listos y finalmente comienza el
  * sueño profundo. 
  */
-void begin_deep_sleep_when_ready();
+void enter_deep_sleep();
+
+/**
+ * @brief Revisa si el dispositivo esta en un estado consistente para iniciar el 
+ * sueño profundo. 
+ * 
+ * Esta funcion nunca bloquea la task que la invoca.
+ */
+esp_err_t is_ready_for_deep_sleep(bool* const out_is_ready);
+
+/**
+ * @brief Activa el wakeup por timer, haciendo que el sueño profundo dure sleep_duration_us, 
+ * a menos que el chip sea despertado antes por alguna otra fuente. 
+ */
+esp_err_t set_max_deep_sleep_duration(const int64_t sleep_duration_us);
 
 #endif /* _POWER_MANAGER_H_ */

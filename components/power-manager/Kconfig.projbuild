@@ -23,5 +23,11 @@ menu "Power management configuration"
         default true
         help
             If true, the device will wakeup from sleep whenever the ULP detects acceleration and rotation.
+
+    config MAX_DEEP_SLEEP_DURATION_MS
+        int "Max deep sleep duration in milliseconds"
+        default 300000
+        help
+            Determines the maximum period of time that the chip can spend in deep sleep mode.
         
 endmenu

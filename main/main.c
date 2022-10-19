@@ -10,6 +10,7 @@
 
 #include <esp_system.h>
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <driver/gpio.h>
 
 // Componentes personalizados
@@ -29,6 +30,8 @@ static const char* TAG = "MAIN";
 #define MAX_RECORD_QUEUE_LEN 5
 #define MAX_SYNC_QUEUE_LEN 5
 #define BATTERY_LVL_QUEUE_SIZE 1
+#define LATEST_HYDR_TIMESTAMP_QUEUE_SIZE 1
+#define BLE_ADV_DURATION_QUEUE_SIZE 1
 
 #define NUM_SENSOR_MEASURES_PER_SECOND 5
 #define MAX_SENSOR_DATA_BUF_SECONDS 5
@@ -44,8 +47,19 @@ static QueueHandle_t xSyncQueue = NULL;
 static QueueHandle_t xMpu6050DataQueue = NULL;
 static QueueHandle_t xHx711DataQueue = NULL;
 static QueueHandle_t xBatteryLevelQueue = NULL;
+/* Queues para ahorro de energia */
+static QueueHandle_t xLatestHydrationTimestampQueue = NULL;
+static QueueHandle_t xBleAdvertisingStartTime = NULL;
+/* Tasks que reciben notificaciones por ahorro de energia */
+static TaskHandle_t xCommunicationTask = NULL;
+static TaskHandle_t xStorageTask = NULL;
+static TaskHandle_t xHydrationInferenceTask = NULL; 
+static TaskHandle_t xWeightMeasurementTask = NULL; 
 
-static const TickType_t power_management_period_ticks = pdMS_TO_TICKS(60 * 1000);
+//TODO: cambiar otra vez a 60 segundos.
+TimerHandle_t power_mgmt_timer_handle = NULL;
+static const TickType_t power_management_period_ticks = pdMS_TO_TICKS(10 * 1000);
+static const TickType_t device_shutdown_timeout_ticks = pdMS_TO_TICKS(3 * 1000);
 
 static esp_err_t battery_monitor_status = ESP_FAIL;
 
@@ -76,11 +90,11 @@ void app_main(void)
         // Esperar un momento para evitar reinicios inmediatos cuando existe un error (solo desarrollo).
         vTaskDelay(pdMS_TO_TICKS(STARTUP_DELAY_MS));
 
-        xTaskCreatePinnedToCore(storage_task, "storage_task", 2048, NULL, 3, NULL, APP_CPU_NUM);
-        xTaskCreatePinnedToCore(hydration_inference_task, "hydr_infer_task", 2048, NULL, 3, NULL, APP_CPU_NUM);
-        xTaskCreatePinnedToCore(communication_task, "comm_sync_task", 4096, NULL, 4, NULL, APP_CPU_NUM);
+        xTaskCreatePinnedToCore(storage_task, "storage_task", 2048, NULL, 3, &xStorageTask, APP_CPU_NUM);
+        xTaskCreatePinnedToCore(hydration_inference_task, "hydr_infer_task", 2048, NULL, 3, &xHydrationInferenceTask, APP_CPU_NUM);
+        xTaskCreatePinnedToCore(communication_task, "comm_sync_task", 4096, NULL, 4, &xCommunicationTask, APP_CPU_NUM);
         xTaskCreatePinnedToCore(mpu6050_measurement_task, "meas_mpu6050_task", 2048, NULL, 3, NULL, APP_CPU_NUM);
-        xTaskCreatePinnedToCore(hx711_measurement_task, "meas_hx711_task", 2048, NULL, 3, NULL, APP_CPU_NUM);
+        xTaskCreatePinnedToCore(hx711_measurement_task, "meas_hx711_task", 2048, NULL, 3, &xWeightMeasurementTask, APP_CPU_NUM);
 
     } else if (ESP_ERR_NO_MEM == setup_status) {
         ESP_LOGW(
@@ -325,6 +339,9 @@ static void hydration_inference_task(void* pvParameters)
 
             if (was_hydration_recorded) 
             {
+                int64_t ms_since_boot = esp_timer_get_time() * 1000LL;
+                xQueueOverwrite(xLatestHydrationTimestampQueue, &ms_since_boot);
+                
                 // Obtener la carga restante de la batería, para asociarla
                 // con el registro de hidratación.
                 battery_measurement_t battery_measurement = {};
@@ -597,6 +614,7 @@ static void hx711_measurement_task(void* pvParameters)
     static const TickType_t hx711_measure_period_ticks = pdMS_TO_TICKS(500);
     static const uint32_t sensor_init_retry_period_ms = 1000;
     static const size_t hx711_read_timeout_ms = 125;
+    static const char* hx711_task_tag = "HX711";
 
     static hx711_t hx711_sensor = {
         .data_out = CONFIG_HX711_DATA_OUT_GPIO,
@@ -617,12 +635,20 @@ static void hx711_measurement_task(void* pvParameters)
         }
     }
 
+    esp_err_t hx711_energy_saver_add_status = add_module_to_notify_before_deep_sleep(hx711_task_tag);
+
+    if (ESP_OK != hx711_energy_saver_add_status)
+    {
+        ESP_LOGW(TAG, "Unable to register the HX711 task for energy saver notifications");
+    }
+
+    bool is_hx711_powered_on = (ESP_OK == hx711_init_status);
     esp_err_t hx711_read_status = ESP_FAIL;
     hx711_measures_t hx711_measurement = {};
 
     while (true)
     {
-        if (ESP_OK == hx711_init_status) 
+        if (is_hx711_powered_on && ESP_OK == hx711_init_status) 
         {
             hx711_read_status = hx711_get_measurements(&hx711_sensor, &hx711_measurement, hx711_read_timeout_ms);
 
@@ -635,7 +661,7 @@ static void hx711_measurement_task(void* pvParameters)
             }
         } 
 
-        if (ESP_OK == hx711_read_status && NULL != xHx711DataQueue)
+        if (is_hx711_powered_on && ESP_OK == hx711_read_status && NULL != xHx711DataQueue)
         {
             ESP_LOGI(
                 TAG, 
@@ -649,6 +675,35 @@ static void hx711_measurement_task(void* pvParameters)
             if (!dataWasSent) 
             {
                 ESP_LOGW(TAG, "Las mediciones del HX711 no pudieron ser escritas en xHx711DataQueue.");
+            }
+        }
+
+        if (ESP_OK == hx711_init_status)
+        {
+            uint32_t notify_value = 0;
+            BaseType_t power_mgmt_notify_received = xTaskNotifyWait(0, ULONG_MAX, &notify_value, (TickType_t) 0);
+
+            if (pdPASS == power_mgmt_notify_received)
+            {
+                ESP_LOGI(TAG, "A power management notification was received by HX711 task. Notify value is %u", notify_value);
+
+                //TODO: manejar situacion de pwr_mgmt
+                esp_err_t hx711_shutdown_status = hx711_set_power(&hx711_sensor, true);
+
+                is_hx711_powered_on = (ESP_OK != hx711_shutdown_status);
+
+                if (is_hx711_powered_on)
+                {
+                    ESP_LOGW(TAG, "Error al intentar apagar el sensor Hx711: %s", esp_err_to_name(hx711_shutdown_status));
+                } else 
+                {
+                    esp_err_t shutdown_notify_status = set_module_ready_for_deep_sleep(hx711_task_tag, true);
+
+                    if (ESP_OK != shutdown_notify_status) 
+                    {
+                        ESP_LOGW(TAG, "Could not set Hx711 task is ready for deep sleep");
+                    }
+                }
             }
         }
 
@@ -681,16 +736,78 @@ static void battery_monitor_timer_callback(TimerHandle_t xTimer)
 
 static void power_management_timer_callback(TimerHandle_t xTimer) 
 {
-    ESP_LOGI(TAG, "Preparing for deep sleep");
+    ESP_LOGI(TAG, "Power manager is running");
 
-    // begin_deep_sleep_when_ready();
+    static const int32_t max_deep_sleep_enter_retry_count = 3;
+    static int32_t deep_sleep_enter_retry_count = 0;
+
+    static const uint8_t low_bat_threshold = 10; // 10%
+    static const int64_t ble_inactive_threshold_ms = 3 * 60 * 1000; // 3 minutos
+    static const int64_t no_recent_hydration_threshold_ms = 60 * 1000; // 1 minuto
+
+    int64_t latest_hydr_timestamp_ms = 0LL;
+    int64_t ble_advertising_start_ms = 0LL;
+    battery_measurement_t battery_charge_state = {};
+
+    BaseType_t hasHydrationRecordTimestamp = xQueuePeek(xLatestHydrationTimestampQueue, &latest_hydr_timestamp_ms, (TickType_t) 0);
+    BaseType_t hasBleAdvertisingDuration = xQueuePeek(xBleAdvertisingStartTime, &ble_advertising_start_ms, (TickType_t) 0);
+    BaseType_t hasBatteryChargeState = xQueuePeek(xBatteryLevelQueue, &battery_charge_state, (TickType_t) 0);
+
+    int64_t ms_since_boot = esp_timer_get_time() * 1000LL;
+
+    bool is_ble_advertising_inactive = (hasBleAdvertisingDuration == pdPASS) && ((ms_since_boot - ble_advertising_start_ms) > ble_inactive_threshold_ms);
+    bool is_latest_hydration_old = (hasHydrationRecordTimestamp == pdPASS) && ((ms_since_boot - latest_hydr_timestamp_ms) > no_recent_hydration_threshold_ms);
+    bool is_battery_charge_low = (hasBatteryChargeState == pdPASS) && (battery_charge_state.remaining_charge <= low_bat_threshold);
+
+    bool should_enter_deep_sleep = is_battery_charge_low || is_ble_advertising_inactive || is_latest_hydration_old;
+    bool has_reached_retry_limit = deep_sleep_enter_retry_count >= max_deep_sleep_enter_retry_count;
+
+    ESP_LOGI(TAG, "Deep sleep enter attempt count: %d", deep_sleep_enter_retry_count);
+
+    if (should_enter_deep_sleep || has_reached_retry_limit)
+    {
+        bool all_tasks_are_ready_for_sleep = false;
+        esp_err_t sleep_check_status = is_ready_for_deep_sleep(&all_tasks_are_ready_for_sleep);
+
+        if (ESP_OK == sleep_check_status)
+        {
+            if (all_tasks_are_ready_for_sleep || has_reached_retry_limit) 
+            {
+                enter_deep_sleep();
+            } else 
+            {
+                BaseType_t change_period_result = xTimerChangePeriod(
+                    power_mgmt_timer_handle, 
+                    device_shutdown_timeout_ticks, 
+                    (TickType_t) 0
+                );
+
+                if (pdPASS == change_period_result)
+                {
+                    // Notificar a tasks que el chip va a iniciar deep sleep.
+                    xTaskNotifyGive(xStorageTask);
+                    xTaskNotifyGive(xCommunicationTask);
+                    xTaskNotifyGive(xHydrationInferenceTask);
+                    xTaskNotifyGive(xWeightMeasurementTask);
+                } else 
+                {
+                    ESP_LOGW(TAG, "Error al configurar timer de manejo de potencia en modo 'timeout'.");
+                }
+            }
+        } else 
+        {
+            ESP_LOGW(TAG, "Error al revisar si las tasks estan listas para deep sleep (%s)", esp_err_to_name(sleep_check_status));
+        }
+    }
 }
 
 static void init_power_management(void) 
 {
     after_wakeup();
 
-    TimerHandle_t power_mgmt_timer_handle = xTimerCreate(
+    set_max_deep_sleep_duration(((int64_t) CONFIG_MAX_DEEP_SLEEP_DURATION_MS) * 1000);
+
+    power_mgmt_timer_handle = xTimerCreate(
         "power_management_timer",
         power_management_period_ticks,
         pdTRUE,
@@ -705,7 +822,6 @@ static void init_power_management(void)
     } else {
         ESP_LOGW(TAG, "Error al crear timer para manejo de energia. Revisa que exista suficiente memoria en heap.");
     }
-
 }
 
 static void init_battery_monitoring(void)
@@ -776,7 +892,10 @@ static esp_err_t global_setup(void)
         xSyncQueue = xQueueCreate( MAX_SYNC_QUEUE_LEN, sizeof(hydration_record_t) );
         xMpu6050DataQueue = xQueueCreate( MAX_MPU6050_DATA_QUEUE_LEN, sizeof(mpu6050_measures_t) );
         xHx711DataQueue = xQueueCreate( MAX_HX711_DATA_QUEUE_LEN, sizeof(hx711_measures_t) );
+
         xBatteryLevelQueue = xQueueCreate( BATTERY_LVL_QUEUE_SIZE, sizeof(battery_measurement_t) );
+        xLatestHydrationTimestampQueue = xQueueCreate(LATEST_HYDR_TIMESTAMP_QUEUE_SIZE, sizeof(int64_t));
+        xBleAdvertisingStartTime = xQueueCreate(BLE_ADV_DURATION_QUEUE_SIZE, sizeof(int64_t));
 
         if (NULL == xStorageQueue || NULL == xSyncQueue || NULL == xMpu6050DataQueue || NULL == xHx711DataQueue|| NULL == xBatteryLevelQueue) 
         {
