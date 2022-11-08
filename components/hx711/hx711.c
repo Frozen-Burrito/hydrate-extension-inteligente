@@ -11,7 +11,7 @@ static const char* TAG = "HX711";
 static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 static const int16_t NUM_DATA_BITS = 24;
 
-static const int32_t lifted_raw_weight = 20000;
+static const int32_t lifted_raw_weight = 25000;
 static const int32_t raw_weight_with_container = 42000;
 static const int32_t raw_weight_per_ml = 150;
 
@@ -265,6 +265,9 @@ uint16_t hx711_volume_ml_from_measurement(const int32_t* measurement)
             ESP_LOGI(TAG, "No hay un contenedor de agua sobre la extension");
             volume_ml = 0;
         }
+    } else 
+    {
+        ESP_LOGI(TAG, "El dispositivo esta levantado");
     }
 
     return volume_ml;

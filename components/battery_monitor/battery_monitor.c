@@ -17,7 +17,7 @@ static esp_adc_cal_characteristics_t* adc_chars;
 
 static const uint32_t battery_charge_mv[CONFIG_BATTERY_CHARGE_CURVE_POINT_COUNT] = 
 {
-    3000, 3125, 3250, 3400, 3525, 3600, 3675, 3710, 3750, 3775, 3800, 3815, 3835, 3860, 3880, 3900, 3920, 3945, 3975, 4025, 4100
+    1500, 1562, 1625, 1700, 1762, 1800, 1837, 1855, 1875, 1887, 1900, 1907, 1917, 1930, 1940, 1950, 1960, 1972, 1987, 2012, 2050
 };
 
 static const uint8_t battery_charge_levels[CONFIG_BATTERY_CHARGE_CURVE_POINT_COUNT] = 
@@ -107,8 +107,6 @@ static esp_err_t sample_adc(uint32_t* out_voltage_mv, size_t num_samples)
             adc2_get_raw((adc2_channel_t) bat_level_channel, bit_width, &raw);
             adc_reading += raw;
         }
-
-        ESP_LOGI(TAG, "ADC%d aggregated voltage: %d mV / %d", ADC_UNIT_1 + 1, adc_reading, num_samples);
     }
 
     adc_reading /= num_samples;
@@ -149,15 +147,14 @@ esp_err_t multi_sample_battery_level(battery_measurement_t* out_bat_measurement,
         // CONFIG_BATTERY_MIN_CHARGE_VOLTS.
         ESP_ERROR_CHECK(!(CONFIG_BATTERY_MAX_CHARGE_VOLTS > CONFIG_BATTERY_MIN_CHARGE_VOLTS));
 
-        int32_t current_charge_mv = battery_voltage - CONFIG_BATTERY_MIN_CHARGE_VOLTS;
-
         int32_t charge_percent = -1;
         
         for (size_t i = 0; i < CONFIG_BATTERY_CHARGE_CURVE_POINT_COUNT; ++i)
         {
-            if (current_charge_mv <= battery_charge_mv[i])
+            if (battery_voltage <= battery_charge_mv[i])
             {
                 charge_percent = battery_charge_levels[i];
+                break;
             }
         }
 

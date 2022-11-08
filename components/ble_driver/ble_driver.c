@@ -180,6 +180,18 @@ esp_err_t ble_driver_shutdown(void)
     return ESP_OK;
 }
 
+esp_err_t ble_sync_battery_charge(uint8_t remaining_battery_charge)
+{
+    esp_err_t status = ESP_OK; 
+
+    if (ESP_OK == status) 
+    {
+        status = battery_svc_set_value(remaining_battery_charge);
+    }
+    
+    return status;
+}
+
 esp_err_t ble_synchronize_hydration_record(const hydration_record_t* record, const uint32_t sync_timeout_ms)
 {
     esp_err_t status = ESP_OK;

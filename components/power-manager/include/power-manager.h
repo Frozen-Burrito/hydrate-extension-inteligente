@@ -61,6 +61,17 @@ void enter_deep_sleep();
 esp_err_t is_ready_for_deep_sleep(bool* const out_is_ready);
 
 /**
+ * @brief Registra un nuevo intento de entrar en modo de sueño profundo. Retorna
+ * el numero actualizado de intentos.
+ */
+int32_t increment_sleep_attempt_count();
+
+/**
+ * @brief Reinicia el número de intentos de entrar en modo de sueño profundo.
+ */
+void reset_sleep_attempt_count();
+
+/**
  * @brief Activa el wakeup por timer, haciendo que el sueño profundo dure sleep_duration_us, 
  * a menos que el chip sea despertado antes por alguna otra fuente. 
  */

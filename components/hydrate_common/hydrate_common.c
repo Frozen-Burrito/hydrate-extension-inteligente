@@ -26,7 +26,7 @@ static const uint16_t max_volume_delta_ml = 250;
 
 // static const float accel_maintained_threshold = 0.01f;
 
-static const int32_t lifted_raw_weight = 18000;
+static const int32_t lifted_raw_weight = 25000;
 
 static const int64_t hydration_cooldown_ms = 3000;
 
@@ -88,7 +88,10 @@ bool hydration_record_from_measures(const sensor_measures_t measurements[], cons
 
     if (hydration_already_recorded)
     {
-        ESP_LOGE(TAG, "Hydration record already created a few seconds ago.");
+        ESP_LOGE(
+            TAG, "Hydration record already created a few seconds ago. %lld ms < %lld ms",
+            measurements[oldest_measurement_index].timestamp_ms, latest_hydration_timestamp_ms + hydration_cooldown_ms
+        );
         return false;
     }
 
@@ -113,10 +116,6 @@ bool hydration_record_from_measures(const sensor_measures_t measurements[], cons
         const sensor_measures_t* next_measurement = &measurements[(record_index + 1) % measurement_count];
 
         const int64_t measurement_duration_ms = next_measurement->timestamp_ms - current_measurement->timestamp_ms; 
-
-        //TODO: determinar si la aceleracion es mantenida inicialmente, cambia, y luego vuelve a ser mantenida
-
-        //TODO: determinar si la rotacion (en eje x o y) cambia a mas de 90 grados (viendo los grados por segundo)
 
         // Verificar la diferencia de peso. Para representar un consumo de agua, 
         // debería cambiar una sola vez a lo largo de measurements y tener un delta
@@ -173,7 +172,7 @@ static int32_t index_of_oldest_measurement(const sensor_measures_t measurements[
 
     for (int32_t i = 0; i < measurement_count; ++i)
     {
-        if (measurements[i].timestamp_ms < oldest_timestamp_ms)
+        if (measurements[i].timestamp_ms > 0 && measurements[i].timestamp_ms < oldest_timestamp_ms)
         {
             index = i;
             oldest_timestamp_ms = measurements[i].timestamp_ms;

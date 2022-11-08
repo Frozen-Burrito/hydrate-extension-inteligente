@@ -25,7 +25,7 @@
 
 static const char* TAG = "MAIN";
 
-#define STARTUP_DELAY_MS 3000
+#define STARTUP_DELAY_MS 500
 
 #define MAX_RECORD_QUEUE_LEN 5
 #define MAX_SYNC_QUEUE_LEN 5
@@ -56,9 +56,12 @@ static TaskHandle_t xStorageTask = NULL;
 static TaskHandle_t xHydrationInferenceTask = NULL; 
 static TaskHandle_t xWeightMeasurementTask = NULL; 
 
-//TODO: cambiar otra vez a 60 segundos.
+// 9:54 - 2037 mV
+// 10:25 - 2020 mV
+
 TimerHandle_t power_mgmt_timer_handle = NULL;
-static const TickType_t power_management_period_ticks = pdMS_TO_TICKS(10 * 1000);
+// static const TickType_t power_management_period_ticks = pdMS_TO_TICKS(15 * 1000);
+static const TickType_t power_management_period_ticks = pdMS_TO_TICKS(1 * 60 * 1000);
 static const TickType_t device_shutdown_timeout_ticks = pdMS_TO_TICKS(3 * 1000);
 
 static esp_err_t battery_monitor_status = ESP_FAIL;
@@ -307,7 +310,6 @@ static void hydration_inference_task(void* pvParameters)
 
     static sensor_measures_t readingsBuffer[MAX_SENSOR_DATA_BUF_LEN] = {};
     size_t indexOfLatestSensorReadings = 0;
-    bool has_reached_required_sample_count = false;
 
     while (true) 
     {
@@ -329,11 +331,29 @@ static void hydration_inference_task(void* pvParameters)
         {
             record_measurements_timestamp(&readingsBuffer[indexOfLatestSensorReadings]);
 
+            sensor_measures_t latest_sensor_data = readingsBuffer[indexOfLatestSensorReadings];
+
+            ESP_LOGI(TAG, "Timestamp de datos de sensores: %lld", latest_sensor_data.timestamp_ms);
+
+            ESP_LOGI(
+                TAG, 
+                "Lecturas de HX711: { raw_weight: %d, volume_ml: %u }", 
+                latest_sensor_data.weight_measurements.raw_weight, latest_sensor_data.weight_measurements.volume_ml
+            );
+
+            ESP_LOGI(
+                TAG, 
+                "Lecturas de MPU6050: { accel: (%.2f, %.2f, %.2f), gyro: (%.2f, %.2f, %.2f), temp: %.2f }", 
+                latest_sensor_data.accel_gyro_measurements.acceleration.x, latest_sensor_data.accel_gyro_measurements.acceleration.y, latest_sensor_data.accel_gyro_measurements.acceleration.z, 
+                latest_sensor_data.accel_gyro_measurements.gyroscope.x, latest_sensor_data.accel_gyro_measurements.gyroscope.y, latest_sensor_data.accel_gyro_measurements.gyroscope.z, 
+                latest_sensor_data.accel_gyro_measurements.temperature
+            );
+
             hydration_record_t hydrationRecord = {};
             
             // Algoritmo para determinar si las mediciones en readingsBuffer
             // son indicativas de consumo de agua.
-            bool was_hydration_recorded = has_reached_required_sample_count && hydration_record_from_measures(readingsBuffer, MAX_SENSOR_DATA_BUF_LEN, &hydrationRecord);
+            bool was_hydration_recorded = hydration_record_from_measures(readingsBuffer, MAX_SENSOR_DATA_BUF_LEN, &hydrationRecord);
 
             ESP_LOGI(TAG, "Do measures represent hydration: %s", (was_hydration_recorded ? "yes" : "no" ));
 
@@ -394,12 +414,7 @@ static void hydration_inference_task(void* pvParameters)
                     );
                 }
             }
-
-            if (indexOfLatestSensorReadings >= MAX_SENSOR_DATA_BUF_LEN - 1)
-            {
-                has_reached_required_sample_count = true;
-            }
-
+            
             ++indexOfLatestSensorReadings;
             indexOfLatestSensorReadings = (indexOfLatestSensorReadings >= MAX_SENSOR_DATA_BUF_LEN)
                 ? indexOfLatestSensorReadings % MAX_SENSOR_DATA_BUF_LEN
@@ -423,15 +438,24 @@ static void communication_task(void* pvParameters)
     static const uint32_t waitForPairedStatusTimeoutMS = 5000;
     static const uint32_t recordReadTimeoutMS = 10 * 1000; 
 
+    static const char* communication_task_tag = "communication_task";
+
     hydration_record_t xRecordToSync = { 0, 0, 0, 0 };
 
     // Intentar inicializar el driver BLE.
-    esp_err_t ble_error = ble_driver_init("Hydrate-0001");
+    esp_err_t ble_init_status = ble_driver_init("Hydrate-0001");
 
-    if (NULL == xSyncQueue || ble_error != ESP_OK)  {
+    if (NULL == xSyncQueue || ble_init_status != ESP_OK)  {
         // Error fatal, terminar inmediatamente este task.
-        ESP_LOGE(TAG, "Error de inicializacion del driver de BLE (%s)", esp_err_to_name(ble_error));
+        ESP_LOGE(TAG, "Error de inicializacion del driver de BLE (%s)", esp_err_to_name(ble_init_status));
         vTaskDelete(NULL);
+    }
+
+    esp_err_t ble_energy_saver_add_status = add_module_to_notify_before_deep_sleep(communication_task_tag);
+
+    if (ESP_OK != ble_energy_saver_add_status)
+    {
+        ESP_LOGW(TAG, "Unable to register the communication task for energy saver notifications");
     }
 
     while (true) 
@@ -526,6 +550,37 @@ static void communication_task(void* pvParameters)
             }
         }
 
+        if (ESP_OK == ble_init_status)
+        {
+            uint32_t notify_value = 0;
+            BaseType_t power_mgmt_notify_received = xTaskNotifyWait(0, ULONG_MAX, &notify_value, (TickType_t) 0);
+
+            if (pdPASS == power_mgmt_notify_received)
+            {
+                ESP_LOGI(TAG, "A power management notification was received by communications task. Notify value is %u", notify_value);
+
+                if (isPaired) 
+                {
+                    //TODO: desconectar BLE
+                } 
+
+                esp_err_t ble_shutdown_status = ble_driver_shutdown();
+
+                if (ESP_OK != ble_shutdown_status)
+                {
+                    ESP_LOGW(TAG, "Error al intentar detener el task de BLE: %s", esp_err_to_name(ble_shutdown_status));
+                } else 
+                {
+                    esp_err_t shutdown_notify_status = set_module_ready_for_deep_sleep(communication_task_tag, true);
+
+                    if (ESP_OK != shutdown_notify_status) 
+                    {
+                        ESP_LOGW(TAG, "Could not set Hx711 task is ready for deep sleep");
+                    }
+                }
+            }
+        }
+
         // Esperar un momento antes de volver a revisar el estado de 
         // la conexión, evitar acaparar todo el tiempo del scheduler 
         // en revisar la conexion.
@@ -553,13 +608,13 @@ static void mpu6050_measurement_task(void* pvParameters)
         }
     }
 
-    ESP_LOGI(TAG, "MPU6050 sensor status (%s)", esp_err_to_name(mpu6050_init_status));
+    ESP_LOGI(TAG, "Status del sensor MPU6050 (%s)", esp_err_to_name(mpu6050_init_status));
 
     if (ESP_OK == mpu6050_init_status)
     {
         uint8_t mpu6050_deviceid;
         mpu6050_get_i2c_id(&mpu6050_deviceid);
-        ESP_LOGI(TAG, "MPU6050 sensor device ID = %2x", mpu6050_deviceid);
+        ESP_LOGI(TAG, "Id I2C del sensor MPU6050 = %2x", mpu6050_deviceid);
     }
 
     esp_err_t mpu6050_read_status = ESP_OK;
@@ -574,20 +629,12 @@ static void mpu6050_measurement_task(void* pvParameters)
 
             if (ESP_OK != mpu6050_read_status) 
             {
-                ESP_LOGW(TAG, "Error obtaining data from MPU6050 (%s)", esp_err_to_name(mpu6050_read_status));
+                ESP_LOGW(TAG, "Error al intentar obtener datos del MPU6050 (%s)", esp_err_to_name(mpu6050_read_status));
             }
         }
 
         if (ESP_OK == mpu6050_read_status && NULL != xMpu6050DataQueue) 
         {
-            ESP_LOGI(
-                TAG, 
-                "Lecturas de sensores: { accel: (%.2f, %.2f, %.2f), gyro: (%.2f, %.2f, %.2f), temp: %.2f }", 
-                mpu6050_data.acceleration.x, mpu6050_data.acceleration.y, mpu6050_data.acceleration.z, 
-                mpu6050_data.gyroscope.x, mpu6050_data.gyroscope.y, mpu6050_data.gyroscope.z, 
-                mpu6050_data.temperature
-            );
-
             BaseType_t dataWasSent = xQueueSendToBack(
                 xMpu6050DataQueue,
                 &mpu6050_data,
@@ -595,7 +642,7 @@ static void mpu6050_measurement_task(void* pvParameters)
             );
 
             if (!dataWasSent) {
-                ESP_LOGW(TAG, "Las lecturas de los sensores no pudieron ser enviadas");
+                ESP_LOGW(TAG, "Las lecturas del sensor MPU6050 no pudieron ser enviadas");
             }
         } else {
             ESP_LOGW(TAG, "Something went wrong while getting sensor readings (mpu6050 %s) (xMpu6050DataQueue != NULL ? %d)", esp_err_to_name(mpu6050_read_status), (xMpu6050DataQueue != NULL));
@@ -663,13 +710,6 @@ static void hx711_measurement_task(void* pvParameters)
 
         if (is_hx711_powered_on && ESP_OK == hx711_read_status && NULL != xHx711DataQueue)
         {
-            ESP_LOGI(
-                TAG, 
-                "Mediciones del HX711: { raw_weight: %i, volume: %uml }", 
-                hx711_measurement.raw_weight,
-                hx711_measurement.volume_ml
-            );
-
             BaseType_t dataWasSent = xQueueOverwrite(xHx711DataQueue, &hx711_measurement);
 
             if (!dataWasSent) 
@@ -728,6 +768,7 @@ static void battery_monitor_timer_callback(TimerHandle_t xTimer)
 
     if (ESP_OK == measure_status) 
     {
+        ble_sync_battery_charge(battery_measurement.remaining_charge);
         xQueueOverwrite(xBatteryLevelQueue, &battery_measurement);
 
         ESP_LOGI(TAG, "Carga restante de la bateria: %d%%", battery_measurement.remaining_charge);
@@ -738,8 +779,8 @@ static void power_management_timer_callback(TimerHandle_t xTimer)
 {
     ESP_LOGI(TAG, "Power manager is running");
 
+    int32_t deep_sleep_attempt_count = increment_sleep_attempt_count();
     static const int32_t max_deep_sleep_enter_retry_count = 3;
-    static int32_t deep_sleep_enter_retry_count = 0;
 
     static const uint8_t low_bat_threshold = 10; // 10%
     static const int64_t ble_inactive_threshold_ms = 3 * 60 * 1000; // 3 minutos
@@ -760,9 +801,9 @@ static void power_management_timer_callback(TimerHandle_t xTimer)
     bool is_battery_charge_low = (hasBatteryChargeState == pdPASS) && (battery_charge_state.remaining_charge <= low_bat_threshold);
 
     bool should_enter_deep_sleep = is_battery_charge_low || is_ble_advertising_inactive || is_latest_hydration_old;
-    bool has_reached_retry_limit = deep_sleep_enter_retry_count >= max_deep_sleep_enter_retry_count;
+    bool has_reached_retry_limit = deep_sleep_attempt_count >= max_deep_sleep_enter_retry_count;
 
-    ESP_LOGI(TAG, "Deep sleep enter attempt count: %d", deep_sleep_enter_retry_count);
+    ESP_LOGI(TAG, "Deep sleep enter attempt count: %d", deep_sleep_attempt_count);
 
     if (should_enter_deep_sleep || has_reached_retry_limit)
     {
@@ -784,6 +825,8 @@ static void power_management_timer_callback(TimerHandle_t xTimer)
 
                 if (pdPASS == change_period_result)
                 {
+                    increment_sleep_attempt_count();
+
                     // Notificar a tasks que el chip va a iniciar deep sleep.
                     xTaskNotifyGive(xStorageTask);
                     xTaskNotifyGive(xCommunicationTask);
@@ -805,7 +848,8 @@ static void init_power_management(void)
 {
     after_wakeup();
 
-    set_max_deep_sleep_duration(((int64_t) CONFIG_MAX_DEEP_SLEEP_DURATION_MS) * 1000);
+    // set_max_deep_sleep_duration(((int64_t) CONFIG_MAX_DEEP_SLEEP_DURATION_MS) * 1000);
+    set_max_deep_sleep_duration(((int64_t) 10000) * 1000);
 
     power_mgmt_timer_handle = xTimerCreate(
         "power_management_timer",

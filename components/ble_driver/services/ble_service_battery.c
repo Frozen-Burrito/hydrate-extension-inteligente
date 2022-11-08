@@ -60,6 +60,11 @@ esp_err_t battery_svc_set_value(uint8_t remaining_battery_percent)
 {
     esp_err_t status = ESP_OK; 
 
+    if (remaining_battery_percent > 100) 
+    {
+        remaining_battery_percent = 100;
+    }
+
     battery_svc_data.remaining_charge[0] = remaining_battery_percent & 0xFF;
 
     ESP_LOG_BUFFER_HEX(TAG, battery_svc_data.remaining_charge, sizeof(battery_svc_data.remaining_charge));

@@ -25,6 +25,8 @@ static EventGroupHandle_t xReadyForDeepSleepEvents = NULL;
 static const char* modules_requiring_shutdown[MAX_MODULES_REQUIRING_SHUTDOWN] = {};
 static size_t num_of_modules_requiring_shutdown = 0;
 
+static int32_t deep_sleep_enter_retry_count = 0;
+
 // ULP
 extern const uint8_t ulp_main_bin_start[] asm("_binary_ulp_main_bin_start");
 extern const uint8_t ulp_main_bin_end[] asm("_binary_ulp_main_bin_end");
@@ -180,6 +182,9 @@ esp_err_t setup_wakeup_sources(void)
 
         ESP_LOGI(TAG, "Activando wakeup desde EXT1 con GPIO%d", ext_wakeup_pin);
 
+        gpio_pullup_dis(ext_wakeup_pin);
+        gpio_pulldown_en(ext_wakeup_pin);
+
         setup_status = esp_sleep_enable_ext1_wakeup(ext1_wakeup_power_on_mask, ESP_EXT1_WAKEUP_ANY_HIGH);
     }
 
@@ -248,6 +253,16 @@ esp_err_t set_module_ready_for_deep_sleep(const char* const module_tag, bool is_
     }
 
     return status;
+}
+
+int32_t increment_sleep_attempt_count()
+{
+    return ++deep_sleep_enter_retry_count;
+}
+
+void reset_sleep_attempt_count()
+{
+    deep_sleep_enter_retry_count = 0;
 }
 
 static int32_t index_of_module_with_shutdown(const char* const module_tag)

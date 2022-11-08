@@ -28,6 +28,8 @@ esp_err_t ble_driver_sleep();
 
 esp_err_t ble_driver_shutdown(void);
 
+esp_err_t ble_sync_battery_charge(uint8_t remaining_battery_charge);
+
 esp_err_t ble_synchronize_hydration_record(const hydration_record_t* record, const uint32_t sync_timeout_ms);
 
 /**
