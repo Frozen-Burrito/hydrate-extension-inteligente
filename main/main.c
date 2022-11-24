@@ -306,7 +306,7 @@ static void hydration_inference_task(void* pvParameters)
     int32_t num_of_records_sent_for_sync = 0;
     int32_t numRecordsSentForStorage = 0; 
 
-    static const TickType_t waitForReadingsTimeoutMs = pdMS_TO_TICKS(10000);
+    static const TickType_t waitForReadingsTimeoutTicks = pdMS_TO_TICKS(10000);
 
     static sensor_measures_t readingsBuffer[MAX_SENSOR_DATA_BUF_LEN] = {};
     size_t indexOfLatestSensorReadings = 0;
@@ -316,7 +316,7 @@ static void hydration_inference_task(void* pvParameters)
         BaseType_t mpu6050_measurements_received = xQueueReceive(
             xMpu6050DataQueue,
             &(readingsBuffer[indexOfLatestSensorReadings].accel_gyro_measurements),
-            waitForReadingsTimeoutMs
+            waitForReadingsTimeoutTicks
         );
 
         BaseType_t hx711_data_available = xQueuePeek(

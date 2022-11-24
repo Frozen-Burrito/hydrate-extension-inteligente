@@ -11,15 +11,15 @@
 
 static const char* TAG = "HYDRATE";
 
-// static const uint32_t seed = 234; 
-// static BaseType_t hasAlreadySeeded = pdFALSE;
+static const uint32_t seed = 390; 
+static BaseType_t hasAlreadySeeded = pdFALSE;
 
-// static const int32_t min_water_volume_ml = 10;
-// static const int32_t max_water_volume_ml = 250;
+static const int32_t min_water_volume_ml = 10;
+static const int32_t max_water_volume_ml = 250;
 static const float min_temperature_celsius = -40.0f;
 static const float max_temperature_celsius = 75.0f;
-// static const int32_t min_battery_level = 0;
-// static const int32_t max_battery_level = 100;
+static const int32_t min_battery_level = 0;
+static const int32_t max_battery_level = 100;
 
 static const uint16_t min_volume_delta_ml = 10;
 static const uint16_t max_volume_delta_ml = 250;
@@ -31,6 +31,34 @@ static const int32_t lifted_raw_weight = 25000;
 static const int64_t hydration_cooldown_ms = 3000;
 
 static int64_t latest_hydration_timestamp_ms = 0;
+
+static int32_t random_next_int(int32_t range, int32_t min);
+
+hydration_record_t create_random_record(void) 
+{
+    uint16_t rand_water_amount = random_next_int(max_water_volume_ml, min_water_volume_ml);
+    int16_t rand_temperature = random_next_int(max_temperature_celsius, min_temperature_celsius);
+    uint8_t rand_battery_lvl = random_next_int(max_battery_level, min_battery_level);
+    int32_t now = (int64_t) time(NULL);
+
+    hydration_record_t randomRecord = { 
+        .water_amount = rand_water_amount, 
+        .temperature  = rand_temperature, 
+        .battery_level  = rand_battery_lvl, 
+        .timestamp    = now 
+    };
+
+    return randomRecord;
+}
+
+static int32_t random_next_int(int32_t range, int32_t min) {
+    if (!hasAlreadySeeded) {
+        srand(seed);
+        hasAlreadySeeded = pdTRUE;
+    }
+    int32_t random_number = rand() % range + min;
+    return random_number;
+}
 
 // Utils
 static float constrain(float number, float min, float max);

@@ -25,6 +25,8 @@ typedef struct {
     int64_t timestamp_ms;
 } sensor_measures_t;
 
+hydration_record_t create_random_record(void);
+
 esp_err_t hydration_record_to_string(char* out_buf, const hydration_record_t* hydration_record);
 
 esp_err_t record_measurements_timestamp(sensor_measures_t* measurement);
