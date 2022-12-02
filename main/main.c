@@ -28,7 +28,7 @@ static const char* TAG = "MAIN";
 #define STARTUP_DELAY_MS 500
 
 #define MAX_RECORD_QUEUE_LEN 5
-#define MAX_SYNC_QUEUE_LEN 5
+#define MAX_SYNC_QUEUE_LEN 10
 #define BATTERY_LVL_QUEUE_SIZE 1
 #define LATEST_HYDR_TIMESTAMP_QUEUE_SIZE 1
 #define BLE_ADV_DURATION_QUEUE_SIZE 1
@@ -77,8 +77,12 @@ static void hx711_measurement_task(void* pvParameters);
 static void battery_monitor_timer_callback(TimerHandle_t xTimer);
 static void power_management_timer_callback(TimerHandle_t xTimer);
 
-/* Funciones de utilidad */
+/* Funciones */
 static esp_err_t send_record_to_sync(const hydration_record_t* hydrationRecord, bool* sentToStorage);
+static esp_err_t sync_records_from_storage(const nvs_handle_t storageHandle);
+static esp_err_t transfer_storage_queue_to_sync(void);
+static esp_err_t store_pending_records(const nvs_handle_t storageHandle);
+
 static void init_power_management(void);
 static void init_battery_monitoring(void);
 static esp_err_t global_setup(void);
@@ -116,9 +120,9 @@ void app_main(void)
 static void storage_task(void* pvParameters) 
 {
     // Abrir y obtener un handle para almacenamiento.
-    nvs_handle_t storage_handle;
+    nvs_handle_t storageHandle;
 
-    esp_err_t nvs_status = storage_open(&storage_handle);
+    esp_err_t nvs_status = storage_open(&storageHandle);
 
     if (xStorageQueue == NULL || nvs_status != ESP_OK)  {
         // Terminar inmediatamente este task, no debe seguir.
@@ -127,9 +131,6 @@ static void storage_task(void* pvParameters)
     }
 
     ESP_LOGI(TAG, "NVS inicializado");
-
-    int16_t indexOfLastStoredRecord = 0;
-    hydration_record_t xReceivedRecord = { 0, 0, 0, 0 };
 
     while (true) 
     {
@@ -150,145 +151,28 @@ static void storage_task(void* pvParameters)
 
         // Determinar si debe enviar los registros almacenados para 
         // sincronizarlos.
-        if (shouldSync) {
+        if (shouldSync) 
+        {
+            esp_err_t queueTransferStatus = transfer_storage_queue_to_sync();
 
-            ESP_LOGD(TAG, "Numero de registros en queue de almacenamiento durante sincronizacion: %d", recordsInStorageQueue);
-
-            // Si por casualidad hay registros que quedaron en la queue
-            // para ser almacenados, enviarlos directamente a la queue de 
-            // sincronización.
-            for (int16_t i = 0; i < recordsInStorageQueue; ++i) {
-                // Recibir un registro debería ser casi instantáneo, porque 
-                // recordsInStorageQueue > 0.
-                BaseType_t recordReceived = xQueueReceive(
-                    xStorageQueue, 
-                    &( xReceivedRecord ), 
-                    (TickType_t) 0 
-                );
-
-                if (recordReceived) {
-                    // Si el registro fue recuperado correctamente, enviarlo a xSyncQueue 
-                    // para que sea sincronizado.
-                    BaseType_t sendResult = xQueueSendToBack(
-                        xSyncQueue, 
-                        (void*) &( xReceivedRecord ), 
-                        (TickType_t) 0
-                    );
-
-                    if (sendResult) {
-                        ESP_LOGI(TAG, "Registro que iba a ser almacenado enviado directamente a sincronizacion");
-                    } else {
-                        ESP_LOGE(TAG, "El registro no pudo ser enviado para sincronizacion");
-                    }
-                }
+            if (ESP_OK != queueTransferStatus) 
+            {
+                ESP_LOGE(TAG, "Error al transferir elmentos de xStorageQueue a xSyncQueue (%s)", esp_err_to_name(queueTransferStatus));
             }
 
-            int16_t numOfStoredRecords = 0;
+            esp_err_t retrieveForSyncStatus = sync_records_from_storage(storageHandle); 
 
-            nvs_status = get_stored_count(storage_handle, &numOfStoredRecords);
-
-            ESP_LOGI(TAG, "Numero de registros almacenados: %d", numOfStoredRecords);
-
-            if (ESP_OK == nvs_status) {
-                // Obtener y enviar cada registro almacenado para que sea sincronizado.
-                for (int16_t i = 0; i < numOfStoredRecords; ++i) {
-
-                    hydration_record_t xRecordToSync = { 0, 0, 0, 0 };
-
-                    int16_t recordIndex = (i + indexOfLastStoredRecord + 1) % MAX_STORED_RECORD_COUNT;
-
-                    // Hay uno o más registros por sincronizar en NVS. 
-                    nvs_status = retrieve_hydration_record(storage_handle, recordIndex, &xRecordToSync);
-
-                    if (ESP_OK == nvs_status) {
-                    
-                        ESP_LOGI(
-                            TAG, 
-                            "Registro obtenido de NVS: (indice %d) { water: %i, temp: %i, bat: %i, time: %lld}",
-                            i, xRecordToSync.water_amount, xRecordToSync.temperature, 
-                            xRecordToSync.battery_level, xRecordToSync.timestamp
-                        );
-
-                        // El registro pudo ser recuperado de NVS con éxito. Enviarlo
-                        // a xSyncQueue para que sea sincronizado.
-                        BaseType_t sendResult = xQueueSendToBack(
-                            xSyncQueue, 
-                            (void*) &xRecordToSync, 
-                            (TickType_t) 0
-                        );
-
-                        if (sendResult == errQUEUE_FULL) {
-                            ESP_LOGE(
-                                TAG, 
-                                "El registro fue recuperado de NVS, pero no pudo ser enviado (errQUEUE_FULL)"
-                            );
-                        } else {
-                            ESP_LOGD(TAG, "Registro recuperado de NVS y enviado para ser sincronizado");
-                        }
-
-                    } else {
-                        // Hubo un error al intentar obtener el registro de hidratacion
-                        // almacenado.
-                        ESP_LOGE(TAG, "Error al recuperar registro desde NVS (%s)", esp_err_to_name(nvs_status)); 
-                    }
-                }
-            } else {
-                // Hubo un error al intentar obtener la cuenta de registros
-                // almacenados.
-                ESP_LOGE(TAG, "Error obteniendo el numero de registros almacenados (%s)", esp_err_to_name(nvs_status));
+            if (ESP_OK != retrieveForSyncStatus) 
+            {
+                ESP_LOGE(TAG, "Error al obtener registros desde NVS para sync (%s)", esp_err_to_name(retrieveForSyncStatus));
             }
-
         } else if (hasRecordsPendingStorage) {
             // No debe sincronizar los registros. Almacenar todos los registros
             // que estén pendientes en xStorageQueue.
-            for (int16_t i = 0; i < recordsInStorageQueue; ++i) {
-                // Esperar a recibir un nuevo registro para almacenar.
-                // Cuando ocurra esto, activar el modo de "storage".
-                BaseType_t queueHadItems = xQueuePeek(
-                    xStorageQueue, 
-                    &( xReceivedRecord ), 
-                    // Recibir un elemento debería ser casi instantáneo, porque hasRecordsPendingStorage es pdTRUE.
-                    (TickType_t) 0 
-                );
+            esp_err_t storageStatus = store_pending_records(storageHandle);
 
-                BaseType_t recordWasStored = pdFALSE;
-
-                if (queueHadItems) {
-                    // Ajustar el índice para que sea un valor en (0, MAX_STORED_RECORD_COUNT) 
-                    // y tome en cuenta el índice último registro almacenado.
-                    int16_t recordIndex = (i + indexOfLastStoredRecord + 1) % MAX_STORED_RECORD_COUNT;
-
-                    nvs_status = store_hydration_record(storage_handle, recordIndex, &xReceivedRecord);
-
-                    recordWasStored = ESP_OK == nvs_status;
-
-                    if (recordWasStored) {
-                        if (i == (recordsInStorageQueue - 1)) {
-                            // Cuando el último registro es almacenado, actualizar
-                            // el offset para los siguientes registros.
-                            indexOfLastStoredRecord = recordIndex;
-                        }
-
-                        ESP_LOGI(TAG, "Registro almacenado en NVS, con indice = %i", recordIndex);
-                    } else {
-                        // Por algún motivo, el almacenamiento en NVS produjo un error.
-                        ESP_LOGE(TAG, "Error al guardar registro en NVS (%s)", esp_err_to_name(nvs_status));
-                    }
-                } else {
-                    ESP_LOGE(TAG, "Esperaba obtener un registro para almacenar, pero la queue estaba vacia");
-                }
-
-                if (recordWasStored) {
-                    BaseType_t recordRemovedFromQueue = xQueueReceive(
-                        xStorageQueue,
-                        &( xReceivedRecord ), 
-                        (TickType_t) 0
-                    );
-
-                    if (!recordRemovedFromQueue) {
-                        ESP_LOGE(TAG, "El registro fue almacenado, pero no fue removido de xStorageQueue (%s)", esp_err_to_name(nvs_status));
-                    }
-                }
+            if (ESP_OK != storageStatus) {
+                ESP_LOGE(TAG, "Error al almacenar registros en NVS (%s)", esp_err_to_name(storageStatus));
             }
         }
 
@@ -296,7 +180,7 @@ static void storage_task(void* pvParameters)
     }
 
     // Close handle for NVS.
-    storage_close(storage_handle);
+    storage_close(storageHandle);
 
     vTaskDelete(NULL);
 }
@@ -1005,6 +889,174 @@ static esp_err_t send_record_to_sync(const hydration_record_t* hydrationRecord, 
     if (ESP_OK == status)
     {
         *sentToStorage = !(PAIRED == connectionStatus);
+    }
+
+    return status;
+}
+
+static esp_err_t sync_records_from_storage(const nvs_handle_t storageHandle) 
+{
+    esp_err_t status = ESP_OK;
+    int16_t numOfStoredRecords = 0;
+
+    status = get_stored_count(storageHandle, &numOfStoredRecords);
+
+    ESP_LOGI(TAG, "%d registros almacenados en NVS", numOfStoredRecords);
+
+    if (ESP_OK == status) {
+        // Obtener y enviar cada registro almacenado para que sea sincronizado.
+        for (int16_t i = 0; i < numOfStoredRecords; ++i) {
+
+            hydration_record_t xRecordToSync = { 0, 0, 0, 0 };
+
+            // Hay uno o más registros por sincronizar en NVS. 
+            status = retrieve_oldest_hydration_record(storageHandle, &xRecordToSync);
+
+            if (ESP_OK == status) {
+                ESP_LOGI(
+                    TAG, 
+                    "Registro obtenido de NVS: (indice %d) { water: %i, temp: %i, bat: %i, time: %lld}",
+                    i, xRecordToSync.water_amount, xRecordToSync.temperature, 
+                    xRecordToSync.battery_level, xRecordToSync.timestamp
+                );
+
+                // El registro pudo ser recuperado de NVS con éxito. Enviarlo
+                // a xSyncQueue para que sea sincronizado.
+                BaseType_t sendResult = xQueueSendToBack(
+                    xSyncQueue, 
+                    (void*) &xRecordToSync, 
+                    (TickType_t) 0
+                );
+
+                if (sendResult == ESP_OK) {
+                    status = commit_retrieval(storageHandle);
+
+                    if (status != ESP_OK) {
+                        ESP_LOGW(TAG, "Registro obtenido de NVS, pero error en commit (%s)", esp_err_to_name(status));
+                    }
+                } else {
+                    ESP_LOGE(
+                        TAG, 
+                        "El registro fue recuperado de NVS, pero no pudo ser enviado (errQUEUE_FULL)"
+                    );
+                }
+            } else {
+                // Hubo un error al intentar obtener el registro de hidratacion
+                // almacenado.
+                ESP_LOGE(TAG, "Error al recuperar registro desde NVS (%s)", esp_err_to_name(status)); 
+            }
+        }
+    } else {
+        // Hubo un error al intentar obtener la cuenta de registros
+        // almacenados.
+        ESP_LOGE(TAG, "Error obteniendo el numero de registros almacenados (%s)", esp_err_to_name(status));
+    }
+
+    return status;
+}
+
+static esp_err_t transfer_storage_queue_to_sync(void)
+{
+    int32_t recordsInStorageQueue = uxQueueMessagesWaiting(xStorageQueue);
+
+    if (recordsInStorageQueue == 0) return ESP_OK;
+
+    esp_err_t status = ESP_OK;
+    hydration_record_t xReceivedRecord = { 0, 0, 0, 0 };
+    ESP_LOGD(TAG, "Se encontraron %d registros en queue de almacenamiento durante sincronizacion", recordsInStorageQueue);
+
+    // Si por casualidad hay registros que quedaron en la queue
+    // para ser almacenados, enviarlos directamente a la queue de 
+    // sincronización.
+    for (int16_t i = 0; i < recordsInStorageQueue; ++i) {
+        // Recibir un registro debería ser casi instantáneo, porque 
+        // recordsInStorageQueue > 0.
+        BaseType_t recordReceived = xQueueReceive(
+            xStorageQueue, 
+            &( xReceivedRecord ), 
+            (TickType_t) 0 
+        );
+
+        if (recordReceived) {
+            // Si el registro fue recuperado correctamente, enviarlo a xSyncQueue 
+            // para que sea sincronizado.
+            BaseType_t sendResult = xQueueSendToBack(
+                xSyncQueue, 
+                (void*) &( xReceivedRecord ), 
+                (TickType_t) 0
+            );
+
+            if (sendResult) {
+                ESP_LOGI(TAG, "Registro que iba a ser almacenado enviado directamente a sincronizacion");
+            } else {
+                status = ESP_FAIL;
+                ESP_LOGE(TAG, "El registro no pudo ser enviado para sincronizacion");
+            }
+        } else {
+            status = ESP_FAIL;
+            ESP_LOGE(
+                TAG, 
+                "Esperaba encontrar %d registros en xStorageQueue, pero no fue posible obtenerlos", 
+                recordsInStorageQueue
+            );
+        }
+    }
+
+    return status;
+}
+
+static esp_err_t store_pending_records(const nvs_handle_t storageHandle)
+{
+    esp_err_t status = ESP_OK;
+    hydration_record_t xReceivedRecord = { 0, 0, 0, 0 };
+
+    int32_t recordsInStorageQueue = uxQueueMessagesWaiting(xStorageQueue);
+
+    for (int16_t i = 0; i < recordsInStorageQueue; ++i) 
+    {
+        BaseType_t queueHadItems = xQueuePeek(
+            xStorageQueue, 
+            &( xReceivedRecord ), 
+            // Recibir un elemento debería ser casi instantáneo, porque hasRecordsPendingStorage es pdTRUE.
+            (TickType_t) 0 
+        );
+
+        BaseType_t recordWasStored = pdFALSE;
+
+        if (queueHadItems) 
+        {
+            status = store_latest_hydration_record(storageHandle, &xReceivedRecord);
+
+            recordWasStored = ESP_OK == status;
+
+            if (recordWasStored) 
+            {
+                ESP_LOGI(TAG, "Registro almacenado en NVS");
+            } else {
+                // Por algún motivo, el almacenamiento en NVS produjo un error.
+                ESP_LOGE(TAG, "Error al guardar registro en NVS (%s)", esp_err_to_name(status));
+            }
+        } else {
+            ESP_LOGE(TAG, "Esperaba obtener un registro para almacenar, pero la queue estaba vacia");
+            status = ESP_FAIL;
+        }
+
+        if (recordWasStored) 
+        {
+            BaseType_t recordRemovedFromQueue = xQueueReceive(
+                xStorageQueue,
+                &( xReceivedRecord ), 
+                (TickType_t) 0
+            );
+
+            if (!recordRemovedFromQueue) {
+                ESP_LOGE(
+                    TAG, 
+                    "El registro fue almacenado, pero no pudo ser removido de xStorageQueue (%s)", 
+                    esp_err_to_name(status)
+                );
+            }
+        }
     }
 
     return status;
