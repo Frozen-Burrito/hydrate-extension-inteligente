@@ -8,6 +8,8 @@
 
 static const char* TAG = "HX711";
 
+#define ESP_INTR_FLAG_DEFAULT 0
+
 static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 static const int16_t NUM_DATA_BITS = 24;
 
@@ -47,7 +49,7 @@ static uint32_t read_raw(gpio_num_t data_out, gpio_num_t pd_sck, hx711_gain_t ga
 
 esp_err_t hx711_init(hx711_t* device) 
 {
-    if (NULL == device) 
+    if (NULL == device || (device->interrupt_on_data && NULL == device->isr_handler)) 
     {
         return ESP_ERR_INVALID_ARG;
     }
@@ -72,6 +74,38 @@ esp_err_t hx711_init(hx711_t* device)
     if (ESP_OK == init_status) 
     {
         init_status = hx711_set_gain(device, device->gain);
+    }
+
+    if (ESP_OK == init_status) 
+    {
+        gpio_reset_pin(device->data_out);
+
+        gpio_config_t dout_config = {};
+
+        if (device->interrupt_on_data)
+        {
+            dout_config.intr_type = GPIO_INTR_NEGEDGE;
+        }
+
+        dout_config.pin_bit_mask = ( 1ULL << device->data_out );
+        dout_config.mode = GPIO_MODE_INPUT;
+        dout_config.pull_up_en = 1;
+
+        init_status = gpio_config(&dout_config);
+    }
+
+    if (ESP_OK == init_status && device->interrupt_on_data)
+    {
+        init_status = gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
+    }
+
+    if (ESP_OK == init_status && device->interrupt_on_data)
+    {
+        init_status = gpio_isr_handler_add(
+            device->data_out,
+            *(device->isr_handler),
+            (void*) device
+        );
     }
 
     return init_status;

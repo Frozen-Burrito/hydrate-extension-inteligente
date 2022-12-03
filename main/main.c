@@ -25,7 +25,7 @@
 
 static const char* TAG = "MAIN";
 
-#define STARTUP_DELAY_MS 500
+#define STARTUP_DELAY_MS 1000
 
 #define MAX_RECORD_QUEUE_LEN 5
 #define MAX_SYNC_QUEUE_LEN 10
@@ -83,27 +83,28 @@ static esp_err_t sync_records_from_storage(const nvs_handle_t storageHandle);
 static esp_err_t transfer_storage_queue_to_sync(void);
 static esp_err_t store_pending_records(const nvs_handle_t storageHandle);
 
+static esp_err_t hx711_setup(void);
+static void IRAM_ATTR hx711_data_isr_handler(void* arg);
+
 static void init_power_management(void);
 static void init_battery_monitoring(void);
-static esp_err_t global_setup(void);
+static esp_err_t app_startup(void);
 
 /* Main app entry point */
 void app_main(void)
 {
     ESP_LOGI(TAG, "Memoria heap disponible = %u bytes", esp_get_minimum_free_heap_size());
+    vTaskDelay(pdMS_TO_TICKS(STARTUP_DELAY_MS));
 
-    esp_err_t setup_status = global_setup();
+    esp_err_t setup_status = app_startup();
 
     if (ESP_OK == setup_status) 
-    {
-        // Esperar un momento para evitar reinicios inmediatos cuando existe un error (solo desarrollo).
-        vTaskDelay(pdMS_TO_TICKS(STARTUP_DELAY_MS));
-
+    {      
         xTaskCreatePinnedToCore(storage_task, "storage_task", 2048, NULL, 3, &xStorageTask, APP_CPU_NUM);
         xTaskCreatePinnedToCore(hydration_inference_task, "hydr_infer_task", 2048, NULL, 3, &xHydrationInferenceTask, APP_CPU_NUM);
         xTaskCreatePinnedToCore(communication_task, "comm_sync_task", 4096, NULL, 4, &xCommunicationTask, APP_CPU_NUM);
         xTaskCreatePinnedToCore(mpu6050_measurement_task, "meas_mpu6050_task", 2048, NULL, 3, NULL, APP_CPU_NUM);
-        xTaskCreatePinnedToCore(hx711_measurement_task, "meas_hx711_task", 2048, NULL, 3, &xWeightMeasurementTask, APP_CPU_NUM);
+        // xTaskCreatePinnedToCore(hx711_measurement_task, "meas_hx711_task", 2048, NULL, 3, &xWeightMeasurementTask, APP_CPU_NUM);
 
         ESP_LOGI(TAG, "Memoria heap disponible = %u bytes", esp_get_minimum_free_heap_size());
 
@@ -115,7 +116,7 @@ void app_main(void)
     } else {
         ESP_LOGE(
             TAG, 
-            "Error al inicializar app usando global_setup() (%s)", 
+            "Error al inicializar app usando app_startup() (%s)", 
             esp_err_to_name(setup_status)
         );
     }
@@ -201,19 +202,19 @@ static void hydration_inference_task(void* pvParameters)
 
     while (true) 
     {
-        BaseType_t mpu6050_measurements_received = xQueueReceive(
-            xMpu6050DataQueue,
-            &(readingsBuffer[indexOfLatestSensorReadings].accel_gyro_measurements),
-            waitForReadingsTimeoutTicks
-        );
-
         BaseType_t hx711_data_available = xQueuePeek(
             xHx711DataQueue,
             &(readingsBuffer[indexOfLatestSensorReadings].weight_measurements),
+            waitForReadingsTimeoutTicks
+        );
+
+        BaseType_t mpu6050_measurements_received = xQueueReceive(
+            xMpu6050DataQueue,
+            &(readingsBuffer[indexOfLatestSensorReadings].accel_gyro_measurements),
             (TickType_t) 0
         );
 
-        bool sensor_measurements_available = pdPASS == hx711_data_available && pdPASS == mpu6050_measurements_received;
+        bool sensor_measurements_available = pdPASS == hx711_data_available;
 
         if (sensor_measurements_available) 
         {
@@ -241,8 +242,8 @@ static void hydration_inference_task(void* pvParameters)
             
             // Algoritmo para determinar si las mediciones en readingsBuffer
             // son indicativas de consumo de agua.
-            bool was_hydration_recorded = hydration_record_from_measures(readingsBuffer, MAX_SENSOR_DATA_BUF_LEN, &hydrationRecord);
-
+            // bool was_hydration_recorded = hydration_record_from_measures(readingsBuffer, MAX_SENSOR_DATA_BUF_LEN, &hydrationRecord);
+            bool was_hydration_recorded = false;
             // ESP_LOGI(TAG, "Do measures represent hydration: %s", (was_hydration_recorded ? "yes" : "no" ));
 
             if (was_hydration_recorded) 
@@ -544,31 +545,64 @@ static void mpu6050_measurement_task(void* pvParameters)
     vTaskDelete(NULL);
 }
 
+static esp_err_t hx711_setup(void)
+{
+    static hx711_t hx711_sensor = {
+        .data_out = CONFIG_HX711_DATA_OUT_GPIO,
+        .pd_sck = CONFIG_HX711_PD_SCK_GPIO,
+        .gain = HX711_GAIN_A_64,
+        .interrupt_on_data = pdTRUE,
+        .isr_handler = hx711_data_isr_handler
+    };
+
+    esp_err_t hx711_init_status = hx711_init(&hx711_sensor);
+
+    if (ESP_OK != hx711_init_status)
+    {
+        ESP_LOGI(TAG, "HX711 sensor status (%s)", esp_err_to_name(hx711_init_status));
+    }
+
+    return hx711_init_status;
+}
+
+static void IRAM_ATTR hx711_data_isr_handler(void* arg)
+{
+    hx711_t* hx711Sensor = (hx711_t*) arg;
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+
+    if (NULL != hx711Sensor)
+    {
+        gpio_intr_disable(hx711Sensor->data_out);
+        hx711_measures_t hx711_measurement = {};
+        esp_err_t read_status = hx711_get_measurements(hx711Sensor, &hx711_measurement, 0);
+
+        if (ESP_OK == read_status && NULL != xHx711DataQueue)
+        {
+            xQueueOverwriteFromISR(xHx711DataQueue, &hx711_measurement, &xHigherPriorityTaskWoken);
+        }
+
+        gpio_intr_enable(hx711Sensor->data_out);       
+    }
+
+    if (xHigherPriorityTaskWoken) 
+    {
+        portYIELD_FROM_ISR();
+    }
+}
+
 static void hx711_measurement_task(void* pvParameters)
 {
     static const TickType_t hx711_measure_period_ticks = pdMS_TO_TICKS(500);
-    static const uint32_t sensor_init_retry_period_ms = 1000;
     static const size_t hx711_read_timeout_ms = 125;
     static const char* hx711_task_tag = "HX711";
 
     static hx711_t hx711_sensor = {
         .data_out = CONFIG_HX711_DATA_OUT_GPIO,
         .pd_sck = CONFIG_HX711_PD_SCK_GPIO,
-        .gain = HX711_GAIN_A_64
+        .gain = HX711_GAIN_A_64,
     };
 
     esp_err_t hx711_init_status = ESP_FAIL;
-
-    while (ESP_OK != hx711_init_status)
-    {
-        hx711_init_status = hx711_init(&hx711_sensor);
-
-        if (ESP_OK != hx711_init_status)
-        {
-            ESP_LOGI(TAG, "HX711 sensor status (%s)", esp_err_to_name(hx711_init_status));
-            vTaskDelay(pdMS_TO_TICKS(sensor_init_retry_period_ms));
-        }
-    }
 
     esp_err_t hx711_energy_saver_add_status = add_module_to_notify_before_deep_sleep(hx711_task_tag);
 
@@ -783,7 +817,7 @@ static void init_battery_monitoring(void)
     xTimerStart(xBatteryMonitorTimer, (TickType_t) 0);
 }
 
-static esp_err_t global_setup(void) 
+static esp_err_t app_startup(void) 
 {
     esp_err_t setup_status = ESP_OK;
 
@@ -837,6 +871,11 @@ static esp_err_t global_setup(void)
         {
             setup_status = ESP_ERR_NO_MEM;
         }
+    }
+
+    if (ESP_OK == setup_status) 
+    {
+        setup_status = hx711_setup();
     }
 
     return setup_status;

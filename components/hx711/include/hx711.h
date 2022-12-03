@@ -16,6 +16,8 @@ typedef struct {
     gpio_num_t data_out;
     gpio_num_t pd_sck;
     hx711_gain_t gain;
+    int interrupt_on_data;
+    gpio_isr_t isr_handler;
 } hx711_t;
 
 typedef struct {
