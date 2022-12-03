@@ -90,6 +90,8 @@ static esp_err_t global_setup(void);
 /* Main app entry point */
 void app_main(void)
 {
+    ESP_LOGI(TAG, "Memoria heap disponible = %u bytes", esp_get_minimum_free_heap_size());
+
     esp_err_t setup_status = global_setup();
 
     if (ESP_OK == setup_status) 
@@ -102,6 +104,8 @@ void app_main(void)
         xTaskCreatePinnedToCore(communication_task, "comm_sync_task", 4096, NULL, 4, &xCommunicationTask, APP_CPU_NUM);
         xTaskCreatePinnedToCore(mpu6050_measurement_task, "meas_mpu6050_task", 2048, NULL, 3, NULL, APP_CPU_NUM);
         xTaskCreatePinnedToCore(hx711_measurement_task, "meas_hx711_task", 2048, NULL, 3, &xWeightMeasurementTask, APP_CPU_NUM);
+
+        ESP_LOGI(TAG, "Memoria heap disponible = %u bytes", esp_get_minimum_free_heap_size());
 
     } else if (ESP_ERR_NO_MEM == setup_status) {
         ESP_LOGW(
@@ -239,7 +243,7 @@ static void hydration_inference_task(void* pvParameters)
             // son indicativas de consumo de agua.
             bool was_hydration_recorded = hydration_record_from_measures(readingsBuffer, MAX_SENSOR_DATA_BUF_LEN, &hydrationRecord);
 
-            ESP_LOGI(TAG, "Do measures represent hydration: %s", (was_hydration_recorded ? "yes" : "no" ));
+            // ESP_LOGI(TAG, "Do measures represent hydration: %s", (was_hydration_recorded ? "yes" : "no" ));
 
             if (was_hydration_recorded) 
             {
@@ -594,6 +598,12 @@ static void hx711_measurement_task(void* pvParameters)
 
         if (is_hx711_powered_on && ESP_OK == hx711_read_status && NULL != xHx711DataQueue)
         {
+            ESP_LOGI(
+                TAG, 
+                "Lecturas de HX711: { raw_weight: %d, volume_ml: %u }", 
+                hx711_measurement.raw_weight, hx711_measurement.volume_ml
+            );
+
             BaseType_t dataWasSent = xQueueOverwrite(xHx711DataQueue, &hx711_measurement);
 
             if (!dataWasSent) 
@@ -776,8 +786,6 @@ static void init_battery_monitoring(void)
 static esp_err_t global_setup(void) 
 {
     esp_err_t setup_status = ESP_OK;
-    // Para fines de prueba, mostrar la memoria heap disponible.
-    ESP_LOGI(TAG, "Size minimo de heap libre (antes de global_setup()): %u bytes", esp_get_minimum_free_heap_size());
 
     if (ESP_OK == setup_status)
     {
@@ -830,9 +838,6 @@ static esp_err_t global_setup(void)
             setup_status = ESP_ERR_NO_MEM;
         }
     }
-
-    // Para fines de prueba, mostrar la memoria heap disponible.
-    ESP_LOGI(TAG, "Size minimo de heap libre (despues de global_setup()): %u bytes", esp_get_minimum_free_heap_size());
 
     return setup_status;
 }

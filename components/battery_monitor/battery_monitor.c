@@ -17,7 +17,7 @@ static esp_adc_cal_characteristics_t* adc_chars;
 
 static const uint32_t battery_charge_mv[CONFIG_BATTERY_CHARGE_CURVE_POINT_COUNT] = 
 {
-    1500, 1562, 1625, 1700, 1762, 1800, 1837, 1855, 1875, 1887, 1900, 1907, 1917, 1930, 1940, 1950, 1960, 1972, 1987, 2012, 2050
+    1500, 1562, 1625, 1700, 1762, 1800, 1837, 1855, 1875, 1887, 1900, 1907, 1917, 1930, 1940, 1950, 1960, 1972, 1987, 2012, 2150
 };
 
 static const uint8_t battery_charge_levels[CONFIG_BATTERY_CHARGE_CURVE_POINT_COUNT] = 
