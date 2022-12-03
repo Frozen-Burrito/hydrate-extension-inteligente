@@ -202,7 +202,7 @@ static void hydration_inference_task(void* pvParameters)
 
     while (true) 
     {
-        BaseType_t hx711_data_available = xQueuePeek(
+        BaseType_t hx711_data_available = xQueueReceive(
             xHx711DataQueue,
             &(readingsBuffer[indexOfLatestSensorReadings].weight_measurements),
             waitForReadingsTimeoutTicks
@@ -226,8 +226,9 @@ static void hydration_inference_task(void* pvParameters)
 
             ESP_LOGI(
                 TAG, 
-                "Lecturas de HX711: { raw_weight: %d, volume_ml: %u }", 
-                latest_sensor_data.weight_measurements.raw_weight, latest_sensor_data.weight_measurements.volume_ml
+                "Lecturas de HX711: { raw_weight: %d, volume_ml: %u, timestamp: %lld }", 
+                latest_sensor_data.weight_measurements.raw_weight, latest_sensor_data.weight_measurements.volume_ml,
+                latest_sensor_data.weight_measurements.timestamp_ms
             );
 
             ESP_LOGI(
@@ -552,7 +553,8 @@ static esp_err_t hx711_setup(void)
         .pd_sck = CONFIG_HX711_PD_SCK_GPIO,
         .gain = HX711_GAIN_A_64,
         .interrupt_on_data = pdTRUE,
-        .isr_handler = hx711_data_isr_handler
+        .isr_handler = hx711_data_isr_handler,
+        .min_read_interval_ms = 200
     };
 
     esp_err_t hx711_init_status = hx711_init(&hx711_sensor);
@@ -579,9 +581,7 @@ static void IRAM_ATTR hx711_data_isr_handler(void* arg)
         if (ESP_OK == read_status && NULL != xHx711DataQueue)
         {
             xQueueOverwriteFromISR(xHx711DataQueue, &hx711_measurement, &xHigherPriorityTaskWoken);
-        }
-
-        gpio_intr_enable(hx711Sensor->data_out);       
+        }     
     }
 
     if (xHigherPriorityTaskWoken) 
@@ -798,7 +798,7 @@ static void init_power_management(void)
 
 static void init_battery_monitoring(void)
 {
-    static const TickType_t batteryMeasurePeriodMs = pdMS_TO_TICKS(10 * 1000);
+    static const TickType_t batteryMeasurePeriodTicks = pdMS_TO_TICKS(10 * 1000);
 
     battery_monitor_status = battery_monitor_init();
 
@@ -806,7 +806,7 @@ static void init_battery_monitoring(void)
 
     TimerHandle_t xBatteryMonitorTimer = xTimerCreate(
         "battery_level_timer",
-        batteryMeasurePeriodMs,
+        batteryMeasurePeriodTicks,
         pdTRUE,
         NULL,
         battery_monitor_timer_callback

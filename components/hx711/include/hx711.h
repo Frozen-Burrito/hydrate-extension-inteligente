@@ -18,11 +18,13 @@ typedef struct {
     hx711_gain_t gain;
     int interrupt_on_data;
     gpio_isr_t isr_handler;
+    uint32_t min_read_interval_ms;
 } hx711_t;
 
 typedef struct {
     int32_t raw_weight;
     uint16_t volume_ml;
+    int64_t timestamp_ms;
 } hx711_measures_t;
 
 esp_err_t hx711_init(hx711_t* device);

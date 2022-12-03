@@ -1,5 +1,6 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/timers.h>
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <esp32/rom/ets_sys.h>
@@ -9,6 +10,7 @@
 static const char* TAG = "HX711";
 
 #define ESP_INTR_FLAG_DEFAULT 0
+#define MIN_DATA_RDY_INTERVAL_MS 20
 
 static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 static const int16_t NUM_DATA_BITS = 24;
@@ -16,6 +18,8 @@ static const int16_t NUM_DATA_BITS = 24;
 static const int32_t lifted_raw_weight = 25000;
 static const int32_t raw_weight_with_container = 42000;
 static const int32_t raw_weight_per_ml = 150;
+
+static void hx711_data_interval_callback(TimerHandle_t xTimer);
 
 static uint32_t read_raw(gpio_num_t data_out, gpio_num_t pd_sck, hx711_gain_t gain) 
 {
@@ -108,8 +112,45 @@ esp_err_t hx711_init(hx711_t* device)
         );
     }
 
+    if (ESP_OK == init_status && device->interrupt_on_data && device->min_read_interval_ms > MIN_DATA_RDY_INTERVAL_MS)
+    {
+        TimerHandle_t xReadTimer = xTimerCreate(
+            "hx711_read_timer",
+            pdMS_TO_TICKS(device->min_read_interval_ms),
+            pdTRUE,
+            (void *) device->data_out,
+            hx711_data_interval_callback 
+        );
+
+        if (xReadTimer == NULL) 
+        {
+            init_status = ESP_ERR_NO_MEM;
+        }
+
+        if (ESP_OK == init_status) 
+        {
+            xTimerStart(xReadTimer, (TickType_t) 0);
+        }
+    }
+
     return init_status;
 }
+
+static void hx711_data_interval_callback(TimerHandle_t xTimer)
+{
+    esp_err_t status = ESP_FAIL;
+    const gpio_num_t data_out = (gpio_num_t) pvTimerGetTimerID(xTimer);
+
+    if (GPIO_IS_VALID_GPIO(data_out))
+    {
+        status = gpio_intr_enable(data_out);  
+    }
+
+    if (ESP_OK != status)
+    {
+        ESP_LOGW(TAG, "Error al activar INT en GPIO%d (%s)", data_out, esp_err_to_name(status));
+    }
+} 
 
 esp_err_t hx711_set_power(hx711_t* device, bool down) 
 {
@@ -260,6 +301,8 @@ esp_err_t hx711_get_measurements(hx711_t* device, hx711_measures_t* const out_me
     if (ESP_OK == status)
     {
         out_measurements->raw_weight = (int32_t) raw_data;
+
+        out_measurements->timestamp_ms = esp_timer_get_time() / 1000;
 
         out_measurements->volume_ml = hx711_volume_ml_from_measurement(&out_measurements->raw_weight);
     }

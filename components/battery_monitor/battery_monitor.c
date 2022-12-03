@@ -58,12 +58,12 @@ esp_err_t battery_monitor_init(void)
         }
 
         if (ESP_ADC_CAL_VAL_EFUSE_TP == value_type) {
-            ESP_LOGI(TAG, "Characterized using Two Point Value\n");
+            ESP_LOGI(TAG, "Characterized using Two Point Value");
         } else if (ESP_ADC_CAL_VAL_EFUSE_VREF == value_type) 
         {
-            ESP_LOGI(TAG, "Characterized using eFuse Vref\n");
+            ESP_LOGI(TAG, "Characterized using eFuse Vref");
         } else {
-            ESP_LOGI(TAG, "Characterized using Default Vref\n");
+            ESP_LOGI(TAG, "Characterized using Default Vref");
         }
     }
 
