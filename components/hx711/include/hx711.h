@@ -2,27 +2,45 @@
 #define _HX711_H_
 
 #include <driver/gpio.h>
+#include <stdbool.h>
+#include <math.h>
+#include <esp_err.h>
 
 typedef enum {
-    HX711_GANANCIA_A_128 = 128,
-    HX711_GANANCIA_B_32,
-    HX711_GANANCIA_A_64,
-} ganancia_hx711_t;
+    HX711_GAIN_A_128 = 0,
+    HX711_GAIN_B_32,
+    HX711_GAIN_A_64,
+} hx711_gain_t;
 
 typedef struct {
-    gpio_num_t pin_dout;
+    gpio_num_t data_out;
     gpio_num_t pd_sck;
-    ganancia_hx711_t ganancia;
+    hx711_gain_t gain;
 } hx711_t;
 
-esp_err_t hx711_init(hx711_t* sensor);
+typedef struct {
+    int32_t raw_weight;
+    uint16_t volume_ml;
+} hx711_measures_t;
 
-esp_err_t hx711_desactivar(hx711_t* sensor);
+esp_err_t hx711_init(hx711_t* device);
 
-esp_err_t hx711_set_ganancia(hx711_t* sensor, ganancia_hx711_t ganancia);
+esp_err_t hx711_set_power(hx711_t* device, bool down);
 
-esp_err_t hx711_revisar_si_listo(hx711_t* sensor, bool* estaListo);
+esp_err_t hx711_set_gain(hx711_t* device, hx711_gain_t gain);
 
-esp_err_t hx711_leer_datos(hx711_t* sensor, int32_t* datos);
+esp_err_t hx711_is_data_ready(hx711_t* device, bool* ready);
 
-#endif 
+esp_err_t hx711_wait_for_data(hx711_t* device, size_t timeout_ms);
+
+esp_err_t hx711_read_data(hx711_t* device, int32_t* data);
+
+esp_err_t hx711_read_average(hx711_t* device, size_t num_samples, int32_t* data);
+
+esp_err_t hx711_get_measurements(hx711_t* device, hx711_measures_t* const out_measurements, size_t timeout_ms);
+
+esp_err_t hx711_calibrate(hx711_t* device);
+
+uint16_t hx711_volume_ml_from_measurement(const int32_t* measurement);
+
+#endif /** _HX711_H_ **/

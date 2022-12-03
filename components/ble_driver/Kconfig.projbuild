@@ -1,0 +1,7 @@
+menu "BLE Device Configuration"
+
+    config BLE_DEVICE_NAME
+        string "BLE Public Device Name"
+        default "Hydrate-0000"
+        
+endmenu

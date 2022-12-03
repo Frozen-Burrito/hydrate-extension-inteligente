@@ -1,0 +1,33 @@
+menu "Power management configuration"
+
+    config LIGHT_SLEEP_ENABLED
+        bool "Light sleep enabled"
+        default true
+        help
+            If true, the device will enter light sleep if it is inactive and will optimize CPU and APB frequency.
+
+    config DEEP_SLEEP_ENABLED
+        bool "Deep sleep enabled"
+        default true
+        help
+            If true, the device will enter deep sleep after certain conditions are met.
+
+    config POWER_ON_GPIO_NUM
+        int "GPIO for EXT1 wakeup"
+        default 14 if IDF_TARGET_ESP32
+        help
+            GPIO number of the external input that will be used as a deep sleep wakeup source
+
+    config ULP_MOVEMENT_WAKEUP
+        bool "Wakeup when ULP detects motion"
+        default true
+        help
+            If true, the device will wakeup from sleep whenever the ULP detects acceleration and rotation.
+
+    config MAX_DEEP_SLEEP_DURATION_MS
+        int "Max deep sleep duration in milliseconds"
+        default 300000
+        help
+            Determines the maximum period of time that the chip can spend in deep sleep mode.
+        
+endmenu

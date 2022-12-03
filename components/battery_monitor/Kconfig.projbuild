@@ -1,0 +1,26 @@
+menu "Battery monitor"
+
+    config BATTERY_CHARGE_CURVE_POINT_COUNT
+        int "Number of entries for the battery charge/discharge curve"
+        default 21
+        help
+            Each entry associates a given battery voltage (in mv) to a charge level
+
+    config BATTERY_MIN_CHARGE_VOLTS
+        int "Battery voltage at minimum charge (mV)"
+        default 3000
+        help
+            Battery voltage at minimum charge (0%, considering safety offset)
+
+    config BATTERY_MAX_CHARGE_VOLTS
+        int "Battery voltage at maximum charge (mV)"
+        default 4125
+        help
+            Battery voltage at maximum charge (100%, considering overcharge offset)
+    
+    config BATTERY_INPUT_GPIO
+        int "GPIO to battery voltage"
+        default 35
+        help 
+            The ADC GPIO used to measure the current battery voltage
+endmenu

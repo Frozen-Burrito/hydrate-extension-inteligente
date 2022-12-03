@@ -1,3 +1,5 @@
 build/
 .devcontainer/
 .vscode/
+managed_components/
+logs/

@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "hx711.c"
+    SRCS "mpu6050_sensor.c"
     INCLUDE_DIRS "include"
-    REQUIRES esp_timer
+    REQUIRES mpu6050
 )
