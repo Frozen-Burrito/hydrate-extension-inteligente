@@ -58,7 +58,6 @@ static QueueHandle_t xBleAdvertisingStartTime = NULL;
 static TaskHandle_t xCommunicationTask = NULL;
 static TaskHandle_t xStorageTask = NULL;
 static TaskHandle_t xHydrationInferenceTask = NULL; 
-static TaskHandle_t xWeightMeasurementTask = NULL; 
 
 TimerHandle_t power_mgmt_timer_handle = NULL;
 // static const TickType_t power_management_period_ticks = pdMS_TO_TICKS(15 * 1000);
@@ -75,8 +74,8 @@ static void mpu6050_measurement_task(void* pvParameters);
 static void hx711_measurement_task(void* pvParameters);
 
 /* Callbacks de timers */
-static void battery_monitor_timer_callback(TimerHandle_t xTimer);
-static void power_management_timer_callback(TimerHandle_t xTimer);
+static void battery_monitor_callback(TimerHandle_t xTimer);
+static void power_management_callback(TimerHandle_t xTimer);
 
 /* Funciones */
 static esp_err_t send_record_to_sync(const hydration_record_t* hydrationRecord, bool* sentToStorage);
@@ -325,9 +324,9 @@ static void hydration_inference_task(void* pvParameters)
 
 static void communication_task(void* pvParameters)
 {
-    // El watchdog para evitar sincronizar registros infinitamente.
+    // El valor "watchdog" para evitar sincronizar registros infinitamente.
     static const uint16_t maxRecordsToSync = MAX_SYNC_QUEUE_LEN + MAX_STORED_RECORD_COUNT;
-    static const uint16_t MAX_SYNC_ATTEMPTS = 5;
+    static const uint16_t MAX_SYNC_ATTEMPTS = 3;
     static const TickType_t SYNC_FAILED_BACKOFF_DELAY = pdMS_TO_TICKS(5000);
 
     static const uint32_t waitForPairedStatusTimeoutMS = 5000;
@@ -359,8 +358,8 @@ static void communication_task(void* pvParameters)
 
         bool isPaired = PAIRED == status;
 
-        if (isPaired) {
-
+        if (isPaired) 
+        {
             int16_t synchronizedRecordsCount = 0;
             int16_t syncAttemptsForCurrentRecord = 0;
 
@@ -571,7 +570,7 @@ static esp_err_t mpu_setup(void)
     static const mpu6050_config_t mpu_config = {
         .i2c_port_num = I2C_NUM_0,
         .address = CONFIG_MPU_I2C_ADDRESS,
-        .enabled_interrupts = MPU_INT_DATA_RDY,
+        .enabled_interrupts = MPU_INT_DATA_RDY_BIT,
         .mpu_int = CONFIG_MPU_INT_GPIO,
         .isr_handler = mpu_data_rdy_isr,
         .min_read_interval_us = CONFIG_MPU_DATA_SAMPLE_INTERVAL_MS
@@ -700,13 +699,13 @@ static void hx711_measurement_task(void* pvParameters)
     vTaskDelete(NULL);
 }
 
-static void battery_monitor_timer_callback(TimerHandle_t xTimer) 
+static void battery_monitor_callback(TimerHandle_t xTimer) 
 {
     battery_measurement_t battery_measurement = {};
 
     if (ESP_OK != battery_monitor_status) 
     {
-        // Si el sensor de batería no está en un estado correcto, intentar
+        // Si el sensor de batería no está listo para hacer un sample, intentar
         // re-inicializarlo.
         battery_monitor_status = battery_monitor_init();
     }
@@ -715,14 +714,13 @@ static void battery_monitor_timer_callback(TimerHandle_t xTimer)
 
     if (ESP_OK == measure_status) 
     {
-        ble_sync_battery_charge(battery_measurement.remaining_charge);
         xQueueOverwrite(xBatteryLevelQueue, &battery_measurement);
 
         ESP_LOGI(TAG, "Carga restante de la bateria: %d%%", battery_measurement.remaining_charge);
     }
 } 
 
-static void power_management_timer_callback(TimerHandle_t xTimer) 
+static void power_management_callback(TimerHandle_t xTimer) 
 {
     ESP_LOGI(TAG, "Power manager is running");
 
@@ -795,15 +793,14 @@ static void init_power_management(void)
 {
     after_wakeup();
 
-    // set_max_deep_sleep_duration(((int64_t) CONFIG_MAX_DEEP_SLEEP_DURATION_MS) * 1000);
-    set_max_deep_sleep_duration(((int64_t) 10000) * 1000);
+    set_max_deep_sleep_duration(((int64_t) CONFIG_MAX_DEEP_SLEEP_DURATION_MS) * 1000);
 
     power_mgmt_timer_handle = xTimerCreate(
         "power_management_timer",
         power_management_period_ticks,
         pdTRUE,
         NULL,
-        power_management_timer_callback
+        power_management_callback
     );
 
     if (NULL != power_mgmt_timer_handle)
@@ -828,7 +825,7 @@ static void init_battery_monitoring(void)
         batteryMeasurePeriodTicks,
         pdTRUE,
         NULL,
-        battery_monitor_timer_callback
+        battery_monitor_callback
     );
 
     // Comenzar el timer periodico para obtener mediciones del

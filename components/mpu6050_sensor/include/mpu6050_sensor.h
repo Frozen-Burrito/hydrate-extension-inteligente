@@ -11,8 +11,10 @@
 #include <mpu6050.h>
 
 #define MPU_INT_NONE ((uint8_t) 0)
-#define MPU_INT_DATA_RDY ((uint8_t) 1 << 0)
-#define MPU_INT_MOTION ((uint8_t) 1 << 6)
+#define MPU_INT_DATA_RDY_BIT ((uint8_t) 1 << 0)
+#define MPU_INT_I2C_MAST_BIT ((uint8_t) 1 << 3)
+#define MPU_INT_FIFO_OFLOW_BIT ((uint8_t) 1 << 4)
+#define MPU_INT_MOTION_BIT ((uint8_t) 1 << 6)
 
 typedef struct {
     float x;
@@ -65,5 +67,11 @@ esp_err_t mpu6050_free_resources(const mpu_handle_t sensor);
  * @brief Lee las mediciones del acelerómetro, giroscopio y termómetro del MPU6050.
  */
 esp_err_t mpu6050_get_measurements(const mpu_handle_t sensor, mpu6050_measures_t* const out_measurements);
+
+esp_err_t mpu6050_enable_interrupts(const mpu_handle_t sensor, const uint8_t interrupt_bits);
+
+esp_err_t mpu6050_disable_interrupts(const mpu_handle_t sensor, const uint8_t interrupt_bits);
+
+esp_err_t mpu6050_read_interrupt_status(const mpu_handle_t sensor, uint8_t* const out_interrupt_status);
 
 #endif /* _MPU6050_SENSOR_H_ */
