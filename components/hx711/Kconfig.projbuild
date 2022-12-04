@@ -1,4 +1,4 @@
-menu "Sensor and measurement configuration"
+menu "Load Cell Amplifier"
 
     config HX711_PD_SCK_GPIO
         int "PD/SCK GPIO number"
@@ -15,5 +15,5 @@ menu "Sensor and measurement configuration"
     config HX711_AVG_SAMPLES_COUNT
         int "Number of hx711 measurement samples to average"
         default 5
-        
+
 endmenu

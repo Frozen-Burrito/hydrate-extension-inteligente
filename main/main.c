@@ -12,6 +12,7 @@
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <driver/gpio.h>
+#include <driver/i2c.h>
 
 // Componentes personalizados
 #include "hydrate_common.h"
@@ -42,6 +43,9 @@ static const char* TAG = "MAIN";
 #define RECORD_RECEIVE_TIMEOUT_MS 500
 #define NUM_BATTERY_CHARGE_SAMPLES 5
 
+#define I2C_SCL_GPIO CONFIG_I2C_SCL_IO
+#define I2C_SDA_GPIO CONFIG_I2C_SDA_IO
+
 static QueueHandle_t xStorageQueue = NULL;
 static QueueHandle_t xSyncQueue = NULL;
 static QueueHandle_t xMpu6050DataQueue = NULL;
@@ -55,9 +59,6 @@ static TaskHandle_t xCommunicationTask = NULL;
 static TaskHandle_t xStorageTask = NULL;
 static TaskHandle_t xHydrationInferenceTask = NULL; 
 static TaskHandle_t xWeightMeasurementTask = NULL; 
-
-// 9:54 - 2037 mV
-// 10:25 - 2020 mV
 
 TimerHandle_t power_mgmt_timer_handle = NULL;
 // static const TickType_t power_management_period_ticks = pdMS_TO_TICKS(15 * 1000);
@@ -86,6 +87,10 @@ static esp_err_t store_pending_records(const nvs_handle_t storageHandle);
 static esp_err_t hx711_setup(void);
 static void IRAM_ATTR hx711_data_isr_handler(void* arg);
 
+static esp_err_t i2c_setup(void);
+static esp_err_t mpu_setup(void);
+static void IRAM_ATTR mpu_data_rdy_isr(void* arg);
+
 static void init_power_management(void);
 static void init_battery_monitoring(void);
 static esp_err_t app_startup(void);
@@ -103,7 +108,7 @@ void app_main(void)
         xTaskCreatePinnedToCore(storage_task, "storage_task", 2048, NULL, 3, &xStorageTask, APP_CPU_NUM);
         xTaskCreatePinnedToCore(hydration_inference_task, "hydr_infer_task", 2048, NULL, 3, &xHydrationInferenceTask, APP_CPU_NUM);
         xTaskCreatePinnedToCore(communication_task, "comm_sync_task", 4096, NULL, 4, &xCommunicationTask, APP_CPU_NUM);
-        xTaskCreatePinnedToCore(mpu6050_measurement_task, "meas_mpu6050_task", 2048, NULL, 3, NULL, APP_CPU_NUM);
+        // xTaskCreatePinnedToCore(mpu6050_measurement_task, "meas_mpu6050_task", 2048, NULL, 3, NULL, APP_CPU_NUM);
         // xTaskCreatePinnedToCore(hx711_measurement_task, "meas_hx711_task", 2048, NULL, 3, &xWeightMeasurementTask, APP_CPU_NUM);
 
         ESP_LOGI(TAG, "Memoria heap disponible = %u bytes", esp_get_minimum_free_heap_size());
@@ -480,72 +485,6 @@ static void communication_task(void* pvParameters)
     vTaskDelete(NULL);
 }
 
-static void mpu6050_measurement_task(void* pvParameters) 
-{
-    static TickType_t measurementIntervalMs = pdMS_TO_TICKS(1000 / NUM_SENSOR_MEASURES_PER_SECOND);
-    static TickType_t mpu6050_init_retry_timeout_ms = 1000;
-
-    esp_err_t mpu6050_init_status = ESP_FAIL;
-
-    while (ESP_OK != mpu6050_init_status)
-    {
-        mpu6050_init_status = mpu6050_init(true);
-
-        if (ESP_OK != mpu6050_init_status) 
-        {
-            ESP_LOGW(TAG, "Error de inicializacion de MPU6050 (%s), reintentando en %.2fs", esp_err_to_name(mpu6050_init_status), mpu6050_init_retry_timeout_ms / 1000.0f);
-            vTaskDelay(pdMS_TO_TICKS(mpu6050_init_retry_timeout_ms));
-        }
-    }
-
-    ESP_LOGI(TAG, "Status del sensor MPU6050 (%s)", esp_err_to_name(mpu6050_init_status));
-
-    if (ESP_OK == mpu6050_init_status)
-    {
-        uint8_t mpu6050_deviceid;
-        mpu6050_get_i2c_id(&mpu6050_deviceid);
-        ESP_LOGI(TAG, "Id I2C del sensor MPU6050 = %2x", mpu6050_deviceid);
-    }
-
-    esp_err_t mpu6050_read_status = ESP_OK;
-    mpu6050_measures_t mpu6050_data = {};
-
-    while (true) 
-    {
-        if (ESP_OK == mpu6050_init_status) 
-        {
-            // Obtener mediciones del MPU6050.
-            mpu6050_read_status = mpu6050_get_measurements(&mpu6050_data);
-
-            if (ESP_OK != mpu6050_read_status) 
-            {
-                ESP_LOGW(TAG, "Error al intentar obtener datos del MPU6050 (%s)", esp_err_to_name(mpu6050_read_status));
-            }
-        }
-
-        if (ESP_OK == mpu6050_read_status && NULL != xMpu6050DataQueue) 
-        {
-            BaseType_t dataWasSent = xQueueSendToBack(
-                xMpu6050DataQueue,
-                &mpu6050_data,
-                (TickType_t) 0
-            );
-
-            if (!dataWasSent) {
-                ESP_LOGW(TAG, "Las lecturas del sensor MPU6050 no pudieron ser enviadas");
-            }
-        } else {
-            ESP_LOGW(TAG, "Something went wrong while getting sensor readings (mpu6050 %s) (xMpu6050DataQueue != NULL ? %d)", esp_err_to_name(mpu6050_read_status), (xMpu6050DataQueue != NULL));
-        }
-
-        vTaskDelay(measurementIntervalMs);
-    }
-
-    mpu6050_free_resources(true);
-
-    vTaskDelete(NULL);
-}
-
 static esp_err_t hx711_setup(void)
 {
     static hx711_t hx711_sensor = {
@@ -561,7 +500,7 @@ static esp_err_t hx711_setup(void)
 
     if (ESP_OK != hx711_init_status)
     {
-        ESP_LOGI(TAG, "HX711 sensor status (%s)", esp_err_to_name(hx711_init_status));
+        ESP_LOGW(TAG, "HX711 sensor status (%s)", esp_err_to_name(hx711_init_status));
     }
 
     return hx711_init_status;
@@ -582,6 +521,86 @@ static void IRAM_ATTR hx711_data_isr_handler(void* arg)
         {
             xQueueOverwriteFromISR(xHx711DataQueue, &hx711_measurement, &xHigherPriorityTaskWoken);
         }     
+    }
+
+    if (xHigherPriorityTaskWoken) 
+    {
+        portYIELD_FROM_ISR();
+    }
+}
+
+static esp_err_t i2c_setup(void)
+{
+    i2c_config_t i2c_bus_config = {
+        .mode = I2C_MODE_MASTER,
+        .sda_io_num = I2C_SDA_GPIO,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_io_num = I2C_SCL_GPIO,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master.clk_speed = CONFIG_I2C_MASTER_FREQ_HZ,
+        .clk_flags = I2C_SCLK_SRC_FLAG_FOR_NOMAL,
+    };
+
+    esp_err_t i2c_init_status = ESP_OK; 
+
+    if (ESP_OK == i2c_init_status) 
+    {
+        i2c_init_status = i2c_param_config(I2C_NUM_0, &i2c_bus_config);
+
+        if (i2c_init_status != ESP_OK) 
+        {
+            ESP_LOGW(TAG, "I2C initialization error (%s)", esp_err_to_name(i2c_init_status));
+        }
+    }
+
+    if (ESP_OK == i2c_init_status) 
+    {
+        i2c_init_status = i2c_driver_install(I2C_NUM_0, i2c_bus_config.mode, 0, 0, 0);
+
+        if (i2c_init_status != ESP_OK) 
+        {
+            ESP_LOGW(TAG, "I2C initialization error (%s)", esp_err_to_name(i2c_init_status));
+        }
+    }
+
+    return i2c_init_status;
+}
+
+static esp_err_t mpu_setup(void)
+{
+    static const mpu6050_config_t mpu_config = {
+        .i2c_port_num = I2C_NUM_0,
+        .address = CONFIG_MPU_I2C_ADDRESS,
+        .enabled_interrupts = MPU_INT_DATA_RDY,
+        .mpu_int = CONFIG_MPU_INT_GPIO,
+        .isr_handler = mpu_data_rdy_isr,
+        .min_read_interval_us = CONFIG_MPU_DATA_SAMPLE_INTERVAL_MS
+    };
+
+    esp_err_t mpu_init_status = mpu6050_init(&mpu_config);
+
+    if (ESP_OK != mpu_init_status)
+    {
+        ESP_LOGW(TAG, "MPU6050 init error, status (%s)", esp_err_to_name(mpu_init_status));
+    }
+
+    return mpu_init_status;
+}
+
+static void IRAM_ATTR mpu_data_rdy_isr(void* arg)
+{
+    const mpu_handle_t mpu6050 = *((mpu_handle_t*) arg);
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+
+    if (NULL != mpu6050)
+    {
+        mpu6050_measures_t mpu6050_data = {};
+        esp_err_t read_status = mpu6050_get_measurements(mpu6050, &mpu6050_data);
+
+        if (ESP_OK == read_status && NULL != xMpu6050DataQueue)
+        {
+            xQueueSendToBackFromISR(xMpu6050DataQueue, &mpu6050_data, &xHigherPriorityTaskWoken);
+        }
     }
 
     if (xHigherPriorityTaskWoken) 
@@ -871,6 +890,16 @@ static esp_err_t app_startup(void)
         {
             setup_status = ESP_ERR_NO_MEM;
         }
+    }
+
+    if (ESP_OK == setup_status)
+    {
+        setup_status = i2c_setup();
+    }
+
+    if (ESP_OK == setup_status)
+    {
+        setup_status = mpu_setup();
     }
 
     if (ESP_OK == setup_status) 
