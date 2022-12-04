@@ -54,7 +54,7 @@ static QueueHandle_t xBatteryLevelQueue = NULL;
 /* Queues para ahorro de energia */
 static QueueHandle_t xLatestHydrationTimestampQueue = NULL;
 static QueueHandle_t xBleAdvertisingStartTime = NULL;
-/* Tasks que reciben notificaciones por ahorro de energia */
+/* Handles para tasks */
 static TaskHandle_t xCommunicationTask = NULL;
 static TaskHandle_t xStorageTask = NULL;
 static TaskHandle_t xHydrationInferenceTask = NULL; 
@@ -107,8 +107,6 @@ void app_main(void)
         xTaskCreatePinnedToCore(storage_task, "storage_task", 2048, NULL, 3, &xStorageTask, APP_CPU_NUM);
         xTaskCreatePinnedToCore(hydration_inference_task, "hydr_infer_task", 2048, NULL, 3, &xHydrationInferenceTask, APP_CPU_NUM);
         xTaskCreatePinnedToCore(communication_task, "comm_sync_task", 4096, NULL, 4, &xCommunicationTask, APP_CPU_NUM);
-        // xTaskCreatePinnedToCore(mpu6050_measurement_task, "meas_mpu6050_task", 2048, NULL, 3, NULL, APP_CPU_NUM);
-        // xTaskCreatePinnedToCore(hx711_measurement_task, "meas_hx711_task", 2048, NULL, 3, &xWeightMeasurementTask, APP_CPU_NUM);
 
         ESP_LOGI(TAG, "Memoria heap disponible = %u bytes", esp_get_minimum_free_heap_size());
 
@@ -606,97 +604,6 @@ static void IRAM_ATTR mpu_data_rdy_isr(void* arg)
     {
         portYIELD_FROM_ISR();
     }
-}
-
-static void hx711_measurement_task(void* pvParameters)
-{
-    static const TickType_t hx711_measure_period_ticks = pdMS_TO_TICKS(500);
-    static const size_t hx711_read_timeout_ms = 125;
-    static const char* hx711_task_tag = "HX711";
-
-    static hx711_t hx711_sensor = {
-        .data_out = CONFIG_HX711_DATA_OUT_GPIO,
-        .pd_sck = CONFIG_HX711_PD_SCK_GPIO,
-        .gain = HX711_GAIN_A_64,
-    };
-
-    esp_err_t hx711_init_status = ESP_FAIL;
-
-    esp_err_t hx711_energy_saver_add_status = add_module_to_notify_before_deep_sleep(hx711_task_tag);
-
-    if (ESP_OK != hx711_energy_saver_add_status)
-    {
-        ESP_LOGW(TAG, "Unable to register the HX711 task for energy saver notifications");
-    }
-
-    bool is_hx711_powered_on = (ESP_OK == hx711_init_status);
-    esp_err_t hx711_read_status = ESP_FAIL;
-    hx711_measures_t hx711_measurement = {};
-
-    while (true)
-    {
-        if (is_hx711_powered_on && ESP_OK == hx711_init_status) 
-        {
-            hx711_read_status = hx711_get_measurements(&hx711_sensor, &hx711_measurement, hx711_read_timeout_ms);
-
-            if (ESP_ERR_TIMEOUT == hx711_read_status) 
-            {
-                ESP_LOGW(TAG, "HX711 data read timeout");
-            } else if (ESP_OK != hx711_read_status) 
-            {
-                ESP_LOGW(TAG, "HX711 read error (%s)", esp_err_to_name(hx711_read_status));
-            }
-        } 
-
-        if (is_hx711_powered_on && ESP_OK == hx711_read_status && NULL != xHx711DataQueue)
-        {
-            ESP_LOGI(
-                TAG, 
-                "Lecturas de HX711: { raw_weight: %d, volume_ml: %u }", 
-                hx711_measurement.raw_weight, hx711_measurement.volume_ml
-            );
-
-            BaseType_t dataWasSent = xQueueOverwrite(xHx711DataQueue, &hx711_measurement);
-
-            if (!dataWasSent) 
-            {
-                ESP_LOGW(TAG, "Las mediciones del HX711 no pudieron ser escritas en xHx711DataQueue.");
-            }
-        }
-
-        if (ESP_OK == hx711_init_status)
-        {
-            uint32_t notify_value = 0;
-            BaseType_t power_mgmt_notify_received = xTaskNotifyWait(0, ULONG_MAX, &notify_value, (TickType_t) 0);
-
-            if (pdPASS == power_mgmt_notify_received)
-            {
-                ESP_LOGI(TAG, "A power management notification was received by HX711 task. Notify value is %u", notify_value);
-
-                //TODO: manejar situacion de pwr_mgmt
-                esp_err_t hx711_shutdown_status = hx711_set_power(&hx711_sensor, true);
-
-                is_hx711_powered_on = (ESP_OK != hx711_shutdown_status);
-
-                if (is_hx711_powered_on)
-                {
-                    ESP_LOGW(TAG, "Error al intentar apagar el sensor Hx711: %s", esp_err_to_name(hx711_shutdown_status));
-                } else 
-                {
-                    esp_err_t shutdown_notify_status = set_module_ready_for_deep_sleep(hx711_task_tag, true);
-
-                    if (ESP_OK != shutdown_notify_status) 
-                    {
-                        ESP_LOGW(TAG, "Could not set Hx711 task is ready for deep sleep");
-                    }
-                }
-            }
-        }
-
-        vTaskDelay(hx711_measure_period_ticks);
-    }
-
-    vTaskDelete(NULL);
 }
 
 static void battery_monitor_callback(TimerHandle_t xTimer) 
