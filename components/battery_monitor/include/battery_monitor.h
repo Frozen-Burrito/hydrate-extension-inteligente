@@ -17,6 +17,8 @@ esp_err_t battery_monitor_init(void);
 
 esp_err_t get_battery_level(battery_measurement_t* out_bat_measurement);
 
+BaseType_t is_battery_low(const battery_measurement_t* const bat_measurement);
+
 esp_err_t multi_sample_battery_level(battery_measurement_t* out_bat_measurement, size_t number_of_samples);
 
 #endif /** _BATTERY_MONITOR_H_ **/

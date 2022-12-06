@@ -3,5 +3,22 @@ menu "BLE Device Configuration"
     config BLE_DEVICE_NAME
         string "BLE Public Device Name"
         default "Hydrate-0000"
-        
+
+    config BLE_FIRST_ADV_DURATION_MS
+        int "Duration of the first BLE pair attempt (ms)"
+        default 180000
+        help 
+            The duration in milliseconds of the first connection attempt.
+
+    config BLE_ADDITIONAL_ADV_ATTEMPT_COUNT
+        int "Number of additional advertising attempts before sleep"
+        default 3
+        help
+            The amount of times the device will reactivate BLE to try to pair with the client before sleeping.
+
+    config BLE_ADDITIONAL_ADV_DURATION_MS
+        int "Duration of additional BLE pair attempts (ms)"
+        default 30000
+        help 
+            The duration in milliseconds of any additional connection attempts.
 endmenu

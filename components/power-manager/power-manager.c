@@ -44,13 +44,18 @@ static void calculate_sleep_duration(void);
 static const char* wakeup_cause_to_name(const esp_sleep_wakeup_cause_t wakeup_cause);
 static int32_t index_of_module_with_shutdown(const char* const module_tag);
 
-esp_err_t after_wakeup(void)
+esp_err_t after_wakeup(BaseType_t* const wakeupFromEXT)
 {
     calculate_sleep_duration();
 
     esp_err_t wakeup_status = ESP_OK;
 
     esp_sleep_wakeup_cause_t wakeup_cause = esp_sleep_get_wakeup_cause();
+
+    if (NULL != wakeupFromEXT)
+    {
+        *wakeupFromEXT = wakeup_cause == ESP_SLEEP_WAKEUP_EXT1; 
+    }
 
     const char* cause_name = wakeup_cause_to_name(wakeup_cause);
 
@@ -59,6 +64,9 @@ esp_err_t after_wakeup(void)
     case ESP_SLEEP_WAKEUP_ULP:
         //TODO: manejar wakeups por ULP
         ESP_LOGI(TAG, "Sistema despertado de deep sleep por ULP, tiempo en deep sleep: %dms", latest_sleep_duration_ms);
+        wakeup_status = ESP_OK;
+        break;
+    case ESP_SLEEP_WAKEUP_EXT0:
         wakeup_status = ESP_OK;
         break;
     case ESP_SLEEP_WAKEUP_EXT1:
@@ -72,7 +80,7 @@ esp_err_t after_wakeup(void)
         break;
     case ESP_SLEEP_WAKEUP_UNDEFINED:
         // El reset no fue causado por deep sleep. Iniciar el programa del ULP.
-        if (CONFIG_ULP_MOVEMENT_WAKEUP)
+        if (CONFIG_WAKEUP_ON_WEIGHT || CONFIG_WAKEUP_ON_MOTION)
         {
             init_ulp_program();
         }
@@ -80,13 +88,6 @@ esp_err_t after_wakeup(void)
     default:
         ESP_LOGI(TAG, "Sistema despertado de deep sleep, causa inesperada: %s", cause_name);
         break;
-    }
-
-    esp_err_t wakeup_sources_status = setup_wakeup_sources();
-
-    if (ESP_OK != wakeup_sources_status)
-    {
-        ESP_LOGW(TAG, "Error al configurar fuentes de activacion de deep sleep (%s)", esp_err_to_name(wakeup_sources_status));
     }
 
     deinit_ulp_rtc_gpio();
@@ -102,7 +103,7 @@ esp_err_t after_wakeup(void)
     return wakeup_status;
 }
 
-esp_err_t is_ready_for_deep_sleep(bool* const out_is_ready)
+esp_err_t is_ready_for_deep_sleep(BaseType_t* const out_is_ready)
 {
     if (NULL == out_is_ready)
     {
@@ -123,7 +124,7 @@ esp_err_t is_ready_for_deep_sleep(bool* const out_is_ready)
 
     EventBits_t tasks_ready_for_sleep = xEventGroupGetBits(xReadyForDeepSleepEvents);
 
-    *out_is_ready = tasks_to_await_before_sleep == tasks_ready_for_sleep;
+    *out_is_ready = (BaseType_t) tasks_to_await_before_sleep == tasks_ready_for_sleep;
 
     return ESP_OK;
 }
@@ -138,7 +139,7 @@ void enter_deep_sleep()
 
     ESP_LOGI(TAG, "Comenzando deep sleep");
 
-    if (CONFIG_ULP_MOVEMENT_WAKEUP)
+    if (CONFIG_WAKEUP_ON_WEIGHT)
     {
         start_ulp_program();
     }
@@ -156,8 +157,7 @@ esp_err_t setup_light_sleep(bool enable_auto_light_sleep)
     if (ESP_OK == light_sleep_setup_status)
     {
         esp_pm_config_esp32_t pm_config = {
-            .max_freq_mhz = 160,
-            .min_freq_mhz = 80,
+            .min_freq_mhz = CONFIG_MIN_CPU_FREQ_MHZ,
             .light_sleep_enable = enable_auto_light_sleep
         };
 
@@ -167,7 +167,7 @@ esp_err_t setup_light_sleep(bool enable_auto_light_sleep)
     return light_sleep_setup_status;
 }
 
-esp_err_t setup_wakeup_sources(void)
+esp_err_t setup_wakeup_sources(const gpio_num_t motionIntPin)
 {
     // IMPORTANTE: en revisiones 0 y 1 de ESP32, EXT0 no es compatible
     // con fuentes de wakeup de ULP y touch pad. Por esto se usa EXT1 en 
@@ -178,9 +178,9 @@ esp_err_t setup_wakeup_sources(void)
     {
         // Activar wakeup desde EXT1.
         const gpio_num_t ext_wakeup_pin = CONFIG_POWER_ON_GPIO_NUM;
-        const uint64_t ext1_wakeup_power_on_mask = 1ULL << ext_wakeup_pin;
+        const uint64_t ext1_wakeup_power_on_mask = (1ULL << ext_wakeup_pin);
 
-        ESP_LOGI(TAG, "Activando wakeup desde EXT1 con GPIO%d", ext_wakeup_pin);
+        ESP_LOGI(TAG, "Activando wakeup desde EXT1 con mask de GPIOs %llu", ext1_wakeup_power_on_mask);
 
         gpio_pullup_dis(ext_wakeup_pin);
         gpio_pulldown_en(ext_wakeup_pin);
@@ -188,7 +188,26 @@ esp_err_t setup_wakeup_sources(void)
         setup_status = esp_sleep_enable_ext1_wakeup(ext1_wakeup_power_on_mask, ESP_EXT1_WAKEUP_ANY_HIGH);
     }
 
-    if (ESP_OK == setup_status && CONFIG_ULP_MOVEMENT_WAKEUP) 
+    if (CONFIG_WAKEUP_ON_MOTION && ESP_OK == setup_status)
+    {
+        if (esp_sleep_is_valid_wakeup_gpio(motionIntPin))
+        {
+            // Activar wakeup desde EXT0
+            setup_status = rtc_gpio_pulldown_dis(motionIntPin);
+            setup_status = rtc_gpio_pullup_en(motionIntPin);
+            
+            if (ESP_OK == setup_status)
+            {
+                ESP_LOGI(TAG, "Activando wakeup desde EXT0 con interrupt de GPIO%d", motionIntPin);
+                setup_status = esp_sleep_enable_ext0_wakeup(motionIntPin, 0);
+            }
+        } else 
+        {
+            ESP_LOGW(TAG, "Motion interrupt GPIO%d is not a valid wake up source", motionIntPin);
+        }
+    }
+
+    if (ESP_OK == setup_status && CONFIG_WAKEUP_ON_WEIGHT)
     {
         // Activar wakeup por programa de ULP.
         ESP_LOGI(TAG, "Activando wakeup por ULP");

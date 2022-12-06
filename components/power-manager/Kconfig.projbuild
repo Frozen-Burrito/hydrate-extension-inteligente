@@ -1,10 +1,22 @@
 menu "Power management configuration"
 
+    config PWR_MANAGER_EXECUTE_PERIOD_MS
+        int "Execution interval for power manager (ms)"
+        default 15000
+        help
+            The period in milliseconds between executions of the power manager.
+
     config LIGHT_SLEEP_ENABLED
         bool "Light sleep enabled"
         default true
         help
             If true, the device will enter light sleep if it is inactive and will optimize CPU and APB frequency.
+
+    config MIN_CPU_FREQ_MHZ
+        int "Minimum CPU frequency"
+        default 80
+        help
+            The frequency used when the ESP_PM_CPU_FREQ_MAX lock is not acquired.
 
     config DEEP_SLEEP_ENABLED
         bool "Deep sleep enabled"
@@ -12,17 +24,27 @@ menu "Power management configuration"
         help
             If true, the device will enter deep sleep after certain conditions are met.
 
+    config MAX_DEEP_SLEEP_ATTEMPTS
+        int "Max attempts to enter deep sleep"
+        default 3  
+        help
+            The number of times the power manager should try to shutdown tasks and enter deep sleep.
+
     config POWER_ON_GPIO_NUM
         int "GPIO for EXT1 wakeup"
         default 14 if IDF_TARGET_ESP32
         help
             GPIO number of the external input that will be used as a deep sleep wakeup source
 
-    config ULP_MOVEMENT_WAKEUP
-        bool "Wakeup when ULP detects motion"
+    config WAKEUP_ON_MOTION
+        bool "Wakeup when MPU detects motion"
         default true
         help
-            If true, the device will wakeup from sleep whenever the ULP detects acceleration and rotation.
+            If true, the device will wakeup from sleep whenever the MPU detects considerable acceleration and rotation.
+
+    config WAKEUP_ON_WEIGHT
+        bool "Wakeup when weight is lifted"
+        default true
 
     config MAX_DEEP_SLEEP_DURATION_MS
         int "Max deep sleep duration in milliseconds"
