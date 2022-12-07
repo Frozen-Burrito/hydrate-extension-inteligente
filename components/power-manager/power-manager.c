@@ -157,6 +157,7 @@ esp_err_t setup_light_sleep(bool enable_auto_light_sleep)
     if (ESP_OK == light_sleep_setup_status)
     {
         esp_pm_config_esp32_t pm_config = {
+            .max_freq_mhz = CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ,
             .min_freq_mhz = CONFIG_MIN_CPU_FREQ_MHZ,
             .light_sleep_enable = enable_auto_light_sleep
         };
@@ -198,8 +199,9 @@ esp_err_t setup_wakeup_sources(const gpio_num_t motionIntPin)
             
             if (ESP_OK == setup_status)
             {
+                const uint64_t ext1MotionWakeupMask = (1ULL << motionIntPin);
                 ESP_LOGI(TAG, "Activando wakeup desde EXT0 con interrupt de GPIO%d", motionIntPin);
-                setup_status = esp_sleep_enable_ext0_wakeup(motionIntPin, 0);
+                setup_status = esp_sleep_enable_ext1_wakeup(ext1MotionWakeupMask, ESP_EXT1_WAKEUP_ALL_LOW);
             }
         } else 
         {

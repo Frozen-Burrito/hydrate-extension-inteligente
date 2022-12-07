@@ -217,19 +217,19 @@ static void hydration_inference_task(void* pvParameters)
 
     while (true) 
     {
-        BaseType_t hx711_data_available = xQueueReceive(
-            xHx711DataQueue,
-            &(readingsBuffer[indexOfLatestSensorReadings].weight_measurements),
-            waitForReadingsTimeoutTicks
-        );
-
         BaseType_t mpu6050_measurements_received = xQueueReceive(
             xMpu6050DataQueue,
             &(readingsBuffer[indexOfLatestSensorReadings].accel_gyro_measurements),
+            waitForReadingsTimeoutTicks
+        );
+
+        BaseType_t hx711_data_available = xQueueReceive(
+            xHx711DataQueue,
+            &(readingsBuffer[indexOfLatestSensorReadings].weight_measurements),
             (TickType_t) 0
         );
 
-        bool sensor_measurements_available = pdPASS == hx711_data_available;
+        bool sensor_measurements_available = true;
 
         if (sensor_measurements_available) 
         {
@@ -317,22 +317,21 @@ static void hydration_inference_task(void* pvParameters)
                         targetMsg
                     );
                 }
+            } else if (timestampOfLastHydrationUs + maxPeriodWithNoHydrationUs > esp_timer_get_time())
+            {
+                ESP_LOGI(TAG, "Pasaron mas de %lld us sin un registro de hidratacion", maxPeriodWithNoHydrationUs);
+                EventBits_t resultBits = xEventGroupSetBits(xDeepSleepConditionEvents, NO_RECENT_HYDRATION_BIT);
+
+                if ((resultBits & NO_RECENT_HYDRATION_BIT) != NO_RECENT_HYDRATION_BIT)
+                {
+                    ESP_LOGW(TAG, "El bit NO_RECENT_HYDRATION_BIT de eventos de deep sleep no fue set");
+                }
             }
             
             ++indexOfLatestSensorReadings;
             indexOfLatestSensorReadings = (indexOfLatestSensorReadings >= MAX_SENSOR_DATA_BUF_LEN)
                 ? indexOfLatestSensorReadings % MAX_SENSOR_DATA_BUF_LEN
                 : indexOfLatestSensorReadings;
-
-        } else if (timestampOfLastHydrationUs + maxPeriodWithNoHydrationUs > esp_timer_get_time())
-        {
-            ESP_LOGI(TAG, "Pasaron mas de %lld us sin un registro de hidratacion", maxPeriodWithNoHydrationUs);
-            EventBits_t resultBits = xEventGroupSetBits(xDeepSleepConditionEvents, NO_RECENT_HYDRATION_BIT);
-
-            if ((resultBits & NO_RECENT_HYDRATION_BIT) != NO_RECENT_HYDRATION_BIT)
-            {
-                ESP_LOGW(TAG, "El bit NO_RECENT_HYDRATION_BIT de eventos de deep sleep no fue set");
-            }
         }
     }
 
@@ -582,7 +581,7 @@ static esp_err_t mpu_setup(void)
     static const mpu6050_config_t mpu_config = {
         .i2c_port_num = I2C_NUM_0,
         .address = CONFIG_MPU_I2C_ADDRESS,
-        .enabled_interrupts = MPU_INT_DATA_RDY_BIT,
+        .enabled_interrupts = MPU_INT_DATA_RDY_BIT | MPU_INT_MOTION_BIT,
         .mpu_int = CONFIG_MPU_INT_GPIO,
         .isr_handler = mpu_data_rdy_isr,
         .min_read_interval_us = CONFIG_MPU_DATA_SAMPLE_INTERVAL_MS
@@ -608,9 +607,15 @@ static void IRAM_ATTR mpu_data_rdy_isr(void* arg)
         mpu6050_measures_t mpu6050_data = {};
         esp_err_t read_status = mpu6050_get_measurements(mpu6050, &mpu6050_data);
 
-        if (ESP_OK == read_status && NULL != xMpu6050DataQueue)
+        if (ESP_OK == read_status)
         {
-            xQueueSendToBackFromISR(xMpu6050DataQueue, &mpu6050_data, &xHigherPriorityTaskWoken);
+            uint8_t interrupt_status = 0x00;
+            mpu6050_read_interrupt_status(mpu6050, &interrupt_status);
+
+            if (NULL != xMpu6050DataQueue)
+            {
+                xQueueSendToBackFromISR(xMpu6050DataQueue, &mpu6050_data, &xHigherPriorityTaskWoken);
+            }
         }
     }
 
@@ -846,6 +851,11 @@ static esp_err_t app_startup(communication_task_param_t* const outCommunicationT
     if (ESP_OK == setup_status) 
     {
         setup_status = hx711_setup();
+    }
+
+    if (ESP_OK == setup_status)
+    {
+        setup_status = gpio_install_isr_service(ESP_INTR_FLAG_LEVEL1);
     }
 
     return setup_status;

@@ -45,24 +45,21 @@ esp_err_t mpu6050_init(const mpu6050_config_t* const sensor_config)
 
     if (ESP_OK == status && sensor_config->enabled_interrupts != MPU_INT_NONE)
     {
-        status = gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
-        ESP_LOGI(TAG, "MPU isr install status (%s)", esp_err_to_name(status));
-    }
-
-    if (ESP_OK == status && sensor_config->enabled_interrupts != MPU_INT_NONE)
-    {
         status = gpio_isr_handler_add(
             sensor_config->mpu_int,
             *(sensor_config->isr_handler),
             (void*) sensor
         );
-        ESP_LOGI(TAG, "MPU add isr handler status (%s)", esp_err_to_name(status));
+    }
+
+    if (ESP_OK == status && sensor_config->enabled_interrupts != MPU_INT_NONE)
+    {
+        status = gpio_intr_enable(sensor_config->mpu_int);
     }
 
     if (ESP_OK == status && sensor_config->enabled_interrupts != MPU_INT_NONE)
     {
         status = mpu6050_enable_interrupts(sensor, sensor_config->enabled_interrupts);
-        ESP_LOGI(TAG, "MPU enable interrupts status (%s)", esp_err_to_name(status));
     }
 
     if (ESP_OK == status && NULL != sensor) 
@@ -209,8 +206,7 @@ esp_err_t mpu6050_enable_interrupts(const mpu_handle_t sensor, const uint8_t int
     if (ESP_OK == status)
     {
         status = mpu6050_read(sensor, MPU6050_INT_ENABLE, &enabled_interrupts, sizeof(enabled_interrupts));
-        // status = i2c_master_write_read_device(I2C_NUM_0, CONFIG_MPU_I2C_ADDRESS, &regAddr, 1, &enabled_interrupts, 1, pdMS_TO_TICKS(10));
-        ESP_LOGI(TAG, "MPU read INT register status (%s)", esp_err_to_name(status));
+        ESP_LOGI(TAG, "MPU INT register (%x)", enabled_interrupts);
     }
 
     if (ESP_OK == status)
@@ -218,8 +214,13 @@ esp_err_t mpu6050_enable_interrupts(const mpu_handle_t sensor, const uint8_t int
         enabled_interrupts |= interrupt_bits;
 
         status = mpu6050_write_byte(sensor, MPU6050_INT_ENABLE, enabled_interrupts);
-        // status = i2c_master_write_to_device(I2C_NUM_0, CONFIG_MPU_I2C_ADDRESS, write_buf, sizeof(write_buf), pdMS_TO_TICKS(10));
-        ESP_LOGI(TAG, "MPU write INT register status (%s)", esp_err_to_name(status));
+        ESP_LOGI(TAG, "MPU INT register (%x)", enabled_interrupts);
+    }
+
+    if (ESP_OK == status)
+    {
+        status = mpu6050_read(sensor, MPU6050_INT_ENABLE, &enabled_interrupts, sizeof(enabled_interrupts));
+        ESP_LOGI(TAG, "MPU INT register confirm (%x)", enabled_interrupts);
     }
 
     return status;

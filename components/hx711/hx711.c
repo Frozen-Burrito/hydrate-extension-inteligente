@@ -9,7 +9,7 @@
 
 static const char* TAG = "HX711";
 
-#define ESP_INTR_FLAG_DEFAULT 0
+#define ESP_INTR_FLAG_DEFAULT 1
 #define MIN_DATA_RDY_INTERVAL_MS 20
 
 static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
@@ -96,11 +96,6 @@ esp_err_t hx711_init(hx711_t* device)
         dout_config.pull_up_en = 1;
 
         init_status = gpio_config(&dout_config);
-    }
-
-    if (ESP_OK == init_status && device->interrupt_on_data)
-    {
-        init_status = gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
     }
 
     if (ESP_OK == init_status && device->interrupt_on_data)
@@ -316,10 +311,10 @@ uint16_t hx711_volume_ml_from_measurement(const int32_t* measurement)
     // siendo sostemido por arriba y la ligera diferencia entre el peso
     // base y el peso con contenedor.
     uint16_t volume_ml = 0;
-
+    //TODO: Comunicar mejor el estado del dispositivo (levantado, error, sin botella.)
     if (NULL == measurement) 
     {
-        ESP_LOGW(TAG, "Measurement for raw weight was null");
+        // ESP_LOGW(TAG, "Measurement for raw weight was null");
         volume_ml = 0;
     }
 
@@ -339,12 +334,12 @@ uint16_t hx711_volume_ml_from_measurement(const int32_t* measurement)
         {
             // Si no tiene el peso del contenedor, no puede tener un volumen de 
             // liquido.
-            ESP_LOGI(TAG, "No hay un contenedor de agua sobre la extension");
+            // ESP_LOGI(TAG, "No hay un contenedor de agua sobre la extension");
             volume_ml = 0;
         }
     } else 
     {
-        ESP_LOGI(TAG, "El dispositivo esta levantado");
+        // ESP_LOGI(TAG, "El dispositivo esta levantado");
     }
 
     return volume_ml;
