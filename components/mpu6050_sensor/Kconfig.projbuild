@@ -29,7 +29,35 @@ menu "MPU"
         default 0x68
         help
             Adress of the MPU6050 sensor in the I2C bus.
+
+    config MPU_MOT_DETECT_THRESHOLD
+        int "MPU motion detection threshold (mg)"
+        default 20
+
+    config MPU_MOT_DETECT_DURATION_MS
+        int "MPU motion detection duration (ms)"
+        default 1
+
+    config MPU_INT_ACTIVE_LOW
+        bool "Set INT pin as active low"
+        help
+            If true, INT pin of the MPU will be configured as active low.
             
+    config MPU_INT_OPEN_DRAIN
+        bool "Configure INT pin as open drain"
+        help
+            If true, INT pin will be configured as open drain. Otherwise, it will be set as pull-push.
+
+    config MPU_INT_LATCH_EN 
+        bool "Latch interrupt on INT pin until cleared"
+        help
+            If ture, INT pin will be held high until interrupt is cleared.
+            
+    config MPU_INT_CLEAR_ON_ANY_READ
+        bool "Clear MPU interrupt on any register read"
+        help
+            If true, interrupt status can be cleared with any read, instead of only by reading INT_STATUS.
+
     config MPU_DATA_SAMPLE_INTERVAL_MS
         int "MPU6050 data sample interval (ms)"
         default 100

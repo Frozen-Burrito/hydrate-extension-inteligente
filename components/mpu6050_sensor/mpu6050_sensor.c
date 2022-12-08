@@ -1,17 +1,34 @@
 #include <stdio.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/timers.h>
+
 #include "mpu6050_sensor.h"
 
 static const char* TAG = "MPU6050";
 
 #define ESP_INTR_FLAG_DEFAULT 0
 
-#define MPU6050_INT_ENABLE 0x38u
-#define MPU6050_INT_STATUS 0x3Au
+#define MPU6050_ACCEL_CFG 0x1C
+#define MPU6050_MOT_THRESH 0x1F
+#define MPU6050_MOT_DURATION 0x20
+#define MPU6050_MOT_DET_CTRL 0x69
+#define MPU6050_INT_PIN_CFG 0x37
+#define MPU6050_INT_ENABLE 0x38
+#define MPU6050_INT_STATUS 0x3A
+
+#define MPU_DHPF_CTRL_5KHZ (1 << 0)
+#define MPU_INT_ACTIVE_LOW_BIT (1 << 7)
+#define MPU_INT_OPEN_DRAIN_BIT (1 << 6)
+#define MPU_INT_LATCH_LVL_BIT  (1 << 5)
+#define MPU_INT_READ_CLEAR_BIT (1 << 4)
 
 static esp_err_t mpu6050_write_byte(mpu_handle_t sensor, const uint8_t reg_addr, const uint8_t data);
 static esp_err_t mpu6050_read(mpu_handle_t sensor, const uint8_t reg_start_addr, uint8_t *const out_data_buf, const size_t data_len);
 
-esp_err_t mpu6050_init(const mpu6050_config_t* const sensor_config)
+static esp_err_t mpu6050_configure_isr(const mpu_handle_t sensor, const mpu6050_config_t* const sensor_config);
+static esp_err_t mpu6050_configure_int_pin(const mpu_handle_t sensor, const mpu6050_config_t* const sensor_config);
+
+esp_err_t mpu6050_init(const mpu6050_config_t* const sensor_config, mpu_handle_t* out_sensor)
 {
     esp_err_t status = ESP_OK;
     mpu_handle_t sensor = NULL;
@@ -20,52 +37,24 @@ esp_err_t mpu6050_init(const mpu6050_config_t* const sensor_config)
     {
         sensor = (mpu_handle_t) mpu6050_create(sensor_config->i2c_port_num, sensor_config->address);
 
-        if (NULL == sensor)
+        if (NULL != sensor)
         {
-            return ESP_ERR_NO_MEM;
+            *out_sensor = sensor;
+        } else 
+        {
+            status = ESP_ERR_NO_MEM;
         }
-    }
-
-    if (ESP_OK == status) 
-    {
-        status = mpu6050_set_sensitivity(sensor, ACCE_FS_4G, GYRO_FS_500DPS);
-    }
-
-    if (ESP_OK == status && sensor_config->enabled_interrupts != MPU_INT_NONE)
-    {
-        gpio_config_t int_config = {
-            .mode = GPIO_MODE_INPUT,
-            .intr_type = GPIO_INTR_NEGEDGE,
-            .pin_bit_mask = (1ULL << sensor_config->mpu_int),
-            .pull_up_en = 1,
-        };
-        
-        status = gpio_config(&int_config);
-    }
-
-    if (ESP_OK == status && sensor_config->enabled_interrupts != MPU_INT_NONE)
-    {
-        status = gpio_isr_handler_add(
-            sensor_config->mpu_int,
-            *(sensor_config->isr_handler),
-            (void*) sensor
-        );
-    }
-
-    if (ESP_OK == status && sensor_config->enabled_interrupts != MPU_INT_NONE)
-    {
-        status = gpio_intr_enable(sensor_config->mpu_int);
-    }
-
-    if (ESP_OK == status && sensor_config->enabled_interrupts != MPU_INT_NONE)
-    {
-        status = mpu6050_enable_interrupts(sensor, sensor_config->enabled_interrupts);
     }
 
     if (ESP_OK == status && NULL != sensor) 
     {
         status = mpu6050_wake_up(sensor);
     }    
+
+    if (ESP_OK == status) 
+    {
+        status = mpu6050_set_sensitivity(sensor, ACCE_FS_4G, GYRO_FS_500DPS);
+    }
 
     return status;
 }
@@ -187,12 +176,80 @@ esp_err_t mpu6050_get_measurements(const mpu_handle_t sensor, mpu6050_measures_t
     return status;
 }
 
-// enabled interrupts = 0x01000001
-// interrupt_bits =     0x01000000
-// ~interrupt_bits =    0x10111111
-// result =             0x00000001
+esp_err_t mpu6050_enable_motion_detect(const mpu_handle_t sensor, mpu6050_config_t* const sensor_config)
+{
+    esp_err_t status = ESP_OK;
+    // Actualizar la configuración del sensor para reflejar
+    // la nueva fuente de interrupts.
+    sensor_config->enabled_interrupts |= MPU_INT_MOTION_BIT;
 
-esp_err_t mpu6050_enable_interrupts(const mpu_handle_t sensor, const uint8_t interrupt_bits)
+    if (ESP_OK == status)
+    {
+        status = mpu6050_configure_int_pin(sensor, sensor_config);
+    }
+
+    if (ESP_OK == status)
+    {
+        status = mpu6050_configure_isr(sensor, sensor_config);
+    }
+
+    if (ESP_OK == status)
+    {
+        uint8_t accel_cfg = 0x00;
+
+        status = mpu6050_read(sensor, MPU6050_ACCEL_CFG, &accel_cfg, sizeof(accel_cfg));
+        ESP_LOGI(TAG, "MPU ACCEL_CFG register (%0X)", accel_cfg);
+
+        if (ESP_OK == status)
+        {
+            accel_cfg |= MPU_DHPF_CTRL_5KHZ;
+            status = mpu6050_write_byte(sensor, MPU6050_ACCEL_CFG, accel_cfg);
+            ESP_LOGI(TAG, "MPU accelerometer configuration set to = %0X", accel_cfg);
+        }
+    }
+
+    if (ESP_OK == status)
+    {
+        uint8_t motionThreshold = (uint8_t) CONFIG_MPU_MOT_DETECT_THRESHOLD;
+        status = mpu6050_write_byte(sensor, MPU6050_MOT_THRESH, motionThreshold);
+        ESP_LOGI(TAG, "MPU motion threshold (%0X)", motionThreshold);
+    }
+
+    if (ESP_OK == status)
+    {
+        uint8_t motionDuration = (uint8_t) CONFIG_MPU_MOT_DETECT_DURATION_MS;
+        status = mpu6050_write_byte(sensor, MPU6050_MOT_DURATION, motionDuration);
+        ESP_LOGI(TAG, "MPU motion duration (%0X)", motionDuration);
+    }
+
+    if (ESP_OK == status)
+    {
+        status = mpu6050_write_byte(sensor, MPU6050_MOT_DET_CTRL, 0x15);
+        ESP_LOGI(TAG, "Set motion detect ctrl (%s)", esp_err_to_name(status));
+    }
+
+
+    if (ESP_OK == status)
+    {
+        uint8_t enabled_interrupts = 0x00;
+        status = mpu6050_read(sensor, MPU6050_INT_ENABLE, &enabled_interrupts, sizeof(enabled_interrupts));
+        ESP_LOGI(TAG, "MPU INT register (%x)", enabled_interrupts);
+
+        BaseType_t motIntIsNotEnabled = (enabled_interrupts & MPU_INT_MOTION_BIT) != MPU_INT_MOTION_BIT;
+
+        if (ESP_OK == status && motIntIsNotEnabled)
+        {
+            enabled_interrupts |= MPU_INT_MOTION_BIT;
+
+            status = mpu6050_write_byte(sensor, MPU6050_INT_ENABLE, enabled_interrupts);
+            ESP_LOGI(TAG, "MPU INT register (%x)", enabled_interrupts);
+        }
+    }
+
+    return status;
+}
+
+esp_err_t mpu6050_enable_interrupts(const mpu_handle_t sensor, const mpu6050_config_t* const sensor_config)
 {
     esp_err_t status = ESP_OK;
     
@@ -201,26 +258,22 @@ esp_err_t mpu6050_enable_interrupts(const mpu_handle_t sensor, const uint8_t int
         status = ESP_ERR_INVALID_ARG;
     }
 
-    uint8_t enabled_interrupts = 0x00;
-
     if (ESP_OK == status)
     {
-        status = mpu6050_read(sensor, MPU6050_INT_ENABLE, &enabled_interrupts, sizeof(enabled_interrupts));
-        ESP_LOGI(TAG, "MPU INT register (%x)", enabled_interrupts);
+        status = mpu6050_configure_int_pin(sensor, sensor_config);
     }
 
     if (ESP_OK == status)
     {
-        enabled_interrupts |= interrupt_bits;
+        uint8_t enabled_interrupts = 0x0 | sensor_config->enabled_interrupts;
 
         status = mpu6050_write_byte(sensor, MPU6050_INT_ENABLE, enabled_interrupts);
-        ESP_LOGI(TAG, "MPU INT register (%x)", enabled_interrupts);
+        ESP_LOGI(TAG, "MPU enabled interrupts (%0X)", enabled_interrupts);
     }
 
     if (ESP_OK == status)
     {
-        status = mpu6050_read(sensor, MPU6050_INT_ENABLE, &enabled_interrupts, sizeof(enabled_interrupts));
-        ESP_LOGI(TAG, "MPU INT register confirm (%x)", enabled_interrupts);
+        status = mpu6050_configure_isr(sensor, sensor_config);
     }
 
     return status;
@@ -260,17 +313,111 @@ esp_err_t mpu6050_read_interrupt_status(const mpu_handle_t sensor, uint8_t* cons
         status = ESP_ERR_INVALID_ARG;
     }
 
-    uint8_t interrupt_status;
+    if (ESP_OK == status)
+    {
+        uint8_t interrupt_status;
+        status = mpu6050_read(sensor, MPU6050_INT_STATUS, &interrupt_status, 1);
+
+        if (ESP_OK == status) 
+        {
+            // Solo asignar valor a out_interrupt_status cuando el read fue ESP_OK.
+            *out_interrupt_status = interrupt_status;
+        }
+    }
+
+    return status;
+}
+
+bool mpu6050_is_intr_for_data(uint8_t intStatus)
+{
+    return ((intStatus & MPU_INT_DATA_RDY_BIT) == MPU_INT_DATA_RDY_BIT);
+}
+
+bool mpu6050_is_intr_for_motion(uint8_t intStatus)
+{
+    return ((intStatus & MPU_INT_MOTION_BIT) == MPU_INT_MOTION_BIT);
+}
+
+static esp_err_t mpu6050_configure_int_pin(const mpu_handle_t sensor, const mpu6050_config_t* const sensor_config)
+{
+    uint8_t int_pin_cfg = 0x00;
+
+#ifdef CONFIG_MPU_INT_ACTIVE_LOW
+    int_pin_cfg |= MPU_INT_ACTIVE_LOW_BIT;
+#endif
+
+#ifdef CONFIG_MPU_INT_OPEN_DRAIN
+    int_pin_cfg |= MPU_INT_OPEN_DRAIN_BIT;
+#endif
+
+#ifdef CONFIG_MPU_INT_LATCH_EN
+    int_pin_cfg |= MPU_INT_LATCH_LVL_BIT;
+#endif
+
+#ifdef CONFIG_MPU_INT_CLEAR_ON_ANY_READ
+    int_pin_cfg |= MPU_INT_READ_CLEAR_BIT;
+#endif
+
+    esp_err_t status = mpu6050_write_byte(sensor, MPU6050_INT_PIN_CFG, int_pin_cfg);
+
+    if (ESP_OK != status) 
+    {
+        ESP_LOGW(
+            TAG, 
+            "Error writing to INT_PIN_CFG reg, value = %0X (%s)",
+            int_pin_cfg, 
+            esp_err_to_name(status)
+        );
+    } else {
+        ESP_LOGI(TAG, "Wrote %0X to INT_PIN_CFG", int_pin_cfg);
+    }
+
+    return status;
+}
+
+static esp_err_t mpu6050_configure_isr(const mpu_handle_t sensor, const mpu6050_config_t* const sensor_config)
+{
+    esp_err_t status = ESP_OK;
+
+    // Si no hay fuentes de interrupts activadas, reiniciar 
+    // la configuración del pin para evitar instalar el ISR
+    // más de una vez.
+    if (sensor_config->enabled_interrupts == MPU_INT_NONE)
+    {
+        status = gpio_reset_pin(sensor_config->mpu_int);
+        return status;
+    }
 
     if (ESP_OK == status)
     {
-        status = mpu6050_read(sensor, MPU6050_INT_STATUS, &interrupt_status, 1);
+#ifdef CONFIG_MPU_INT_ACTIVE_LOW
+        bool intActiveLow = true;
+#else
+        bool intActiveLow = false;
+#endif
+        gpio_config_t int_config = {
+            .mode = GPIO_MODE_INPUT,
+            .intr_type = intActiveLow ? GPIO_INTR_NEGEDGE : GPIO_INTR_POSEDGE,
+            .pin_bit_mask = (1ULL << sensor_config->mpu_int),
+            // .pull_up_en = intActiveLow ? GPIO_PULLUP_ENABLE : GPIO_PULLUP_DISABLE,
+            // .pull_down_en = intActiveLow ? GPIO_PULLDOWN_DISABLE : GPIO_PULLDOWN_ENABLE
+        };
+        
+        status = gpio_config(&int_config);
     }
 
-    if (ESP_OK == status) 
+    if (ESP_OK == status)
     {
-        // Solo asignar valor a out_interrupt_status cuando el read fue ESP_OK.
-        *out_interrupt_status = interrupt_status;
+        status = gpio_isr_handler_add(
+            sensor_config->mpu_int,
+            *(sensor_config->isr_handler),
+            NULL
+        );
+    }
+
+    if (ESP_OK == status)
+    {
+        status = gpio_intr_enable(sensor_config->mpu_int);
     }
 
     return status;

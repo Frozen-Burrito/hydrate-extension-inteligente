@@ -43,7 +43,7 @@ typedef mpu6050_handle_t mpu_handle_t;
  * @brief Registra un nuevo MPU6050 y lo configura con senstividad por default. Finalmente, despierta
  * al MPU6050.
  */
-esp_err_t mpu6050_init(const mpu6050_config_t* const sensor_config);
+esp_err_t mpu6050_init(const mpu6050_config_t* const sensor_config, mpu_handle_t* out_sensor);
 
 esp_err_t mpu6050_get_i2c_id(const mpu_handle_t sensor, uint8_t* const out_mpu6050_id);
 
@@ -68,7 +68,16 @@ esp_err_t mpu6050_free_resources(const mpu_handle_t sensor);
  */
 esp_err_t mpu6050_get_measurements(const mpu_handle_t sensor, mpu6050_measures_t* const out_measurements);
 
-esp_err_t mpu6050_enable_interrupts(const mpu_handle_t sensor, const uint8_t interrupt_bits);
+bool mpu6050_is_intr_for_data(uint8_t intStatus);
+bool mpu6050_is_intr_for_motion(uint8_t intStatus);
+
+/**
+ * @brief Configura la detección de movimiento del MPU y activa los interrupts por
+ * motion detection.
+*/
+esp_err_t mpu6050_enable_motion_detect(const mpu_handle_t sensor, mpu6050_config_t* const sensor_config);
+
+esp_err_t mpu6050_enable_interrupts(const mpu_handle_t sensor, const mpu6050_config_t* const sensor_config);
 
 esp_err_t mpu6050_disable_interrupts(const mpu_handle_t sensor, const uint8_t interrupt_bits);
 
