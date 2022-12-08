@@ -196,6 +196,16 @@ esp_err_t ble_synchronize_hydration_record(const hydration_record_t* record, con
 {
     esp_err_t status = ESP_OK;
 
+    if (NULL == xBleStateEvents)
+    {
+        status = ESP_FAIL;
+    }
+
+    if (NULL == record) 
+    {
+        status = ESP_ERR_INVALID_ARG;
+    }
+
     if (ESP_OK == status) 
     {
         status = hydration_svc_set_value(record);
@@ -206,23 +216,26 @@ esp_err_t ble_synchronize_hydration_record(const hydration_record_t* record, con
         status = battery_svc_set_value(record->battery_level);
     }
 
-    ESP_LOGI(
-        TAG, 
-        "Registro convertido a buffers para ser sincronizado (water_amount, temperature, battery_level, timestamp):"
-    );
+    if (ESP_OK == status)
+    {
+        ESP_LOGI(
+            TAG, 
+            "Registro convertido a buffers para ser sincronizado (water_amount, temperature, battery_level, timestamp):"
+        );
 
-    xEventGroupClearBits(xBleStateEvents, RECORD_SYNCHRONIZED_BIT);
+        xEventGroupClearBits(xBleStateEvents, RECORD_SYNCHRONIZED_BIT);
 
-    is_record_available = 0x01;
+        is_record_available = 0x01;
 
-    esp_err_t notify_status = ble_gatt_server_indicate(
-        hydration_handle_table[HYDR_IDX_HAS_NEW_RECORDS_VAL],
-        sizeof(is_record_available),
-        &is_record_available,
-        false
-    );
+        status = ble_gatt_server_indicate(
+            hydration_handle_table[HYDR_IDX_HAS_NEW_RECORDS_VAL],
+            sizeof(is_record_available),
+            &is_record_available,
+            false
+        );
+    }
 
-    if (ESP_OK == notify_status) 
+    if (ESP_OK == status) 
     {
         // Esperar a recibir un WRITE_EVT en is_record_available, o a timeout.
         EventBits_t bleStatusBits = xEventGroupWaitBits(
@@ -236,18 +249,23 @@ esp_err_t ble_synchronize_hydration_record(const hydration_record_t* record, con
         if (bleStatusBits & RECORD_SYNCHRONIZED_BIT) 
         {
             xEventGroupClearBits(xBleStateEvents, RECORD_SYNCHRONIZED_BIT);
-            return ESP_OK;
         } else 
         {
-            return ESP_ERR_TIMEOUT;
+            status = ESP_ERR_TIMEOUT;
         }
     }
 
-    return ESP_FAIL;
+
+    return status;
 }
 
 ble_status_t ble_wait_for_state(const ble_status_t status, const bool match_exact_state, const uint32_t ms_to_wait) 
 {
+    if (NULL == xBleStateEvents)
+    {
+        return INACTIVE_BIT;
+    }
+
     // Determinar los bits que deben ser esperados.
     EventBits_t bitsToWaitFor = ble_status_to_event_bits(status);
 
