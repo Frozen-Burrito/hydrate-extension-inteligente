@@ -233,7 +233,7 @@ esp_err_t mpu6050_enable_motion_detect(const mpu_handle_t sensor, mpu6050_config
     {
         uint8_t enabled_interrupts = 0x00;
         status = mpu6050_read(sensor, MPU6050_INT_ENABLE, &enabled_interrupts, sizeof(enabled_interrupts));
-        ESP_LOGI(TAG, "MPU INT register (%x)", enabled_interrupts);
+        ESP_LOGI(TAG, "MPU INT register (%0X)", enabled_interrupts);
 
         BaseType_t motIntIsNotEnabled = (enabled_interrupts & MPU_INT_MOTION_BIT) != MPU_INT_MOTION_BIT;
 
@@ -242,7 +242,7 @@ esp_err_t mpu6050_enable_motion_detect(const mpu_handle_t sensor, mpu6050_config
             enabled_interrupts |= MPU_INT_MOTION_BIT;
 
             status = mpu6050_write_byte(sensor, MPU6050_INT_ENABLE, enabled_interrupts);
-            ESP_LOGI(TAG, "MPU INT register (%x)", enabled_interrupts);
+            ESP_LOGI(TAG, "MPU INT register (%0X)", enabled_interrupts);
         }
     }
 
