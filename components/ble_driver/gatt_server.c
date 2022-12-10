@@ -154,6 +154,18 @@ esp_err_t ble_gatt_server_shutdown()
     return status;
 }
 
+esp_err_t ble_gatt_server_disconnect(void)
+{
+    esp_err_t status = ESP_OK;
+
+    if (ESP_OK == status)
+    {
+        status = esp_ble_gatts_close(profile.gatts_if, profile.conn_id);
+    }
+
+    return status;
+}
+
 esp_err_t ble_gatt_server_indicate(uint16_t attribute_handle, uint16_t value_len, uint8_t* value, bool need_confirm)
 {
     esp_err_t status = ESP_OK;

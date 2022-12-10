@@ -12,6 +12,7 @@
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <driver/gpio.h>
+#include <driver/i2c.h>
 
 // Componentes personalizados
 #include "hydrate_common.h"
@@ -30,65 +31,91 @@ static const char* TAG = "MAIN";
 #define MAX_RECORD_QUEUE_LEN 5
 #define MAX_SYNC_QUEUE_LEN 10
 #define BATTERY_LVL_QUEUE_SIZE 1
-#define LATEST_HYDR_TIMESTAMP_QUEUE_SIZE 1
-#define BLE_ADV_DURATION_QUEUE_SIZE 1
 
 #define NUM_SENSOR_MEASURES_PER_SECOND 5
 #define MAX_SENSOR_DATA_BUF_SECONDS 5
 #define MAX_SENSOR_DATA_BUF_LEN MAX_SENSOR_DATA_BUF_SECONDS * NUM_SENSOR_MEASURES_PER_SECOND
-#define MAX_MPU6050_DATA_QUEUE_LEN 10
 #define MAX_HX711_DATA_QUEUE_LEN 1
 
 #define RECORD_RECEIVE_TIMEOUT_MS 500
 #define NUM_BATTERY_CHARGE_SAMPLES 5
 
+#define NO_RECENT_HYDRATION_BIT (0x01 << 0) 
+#define BLE_INACTIVE_BIT (0x01 << 1) 
+#define LOW_BAT_BIT (0x01 << 2)
+
+#define MPU_INTERRUPT_BIT (0x01 << 0)
+#define HX711_INTERRUPT_BIT (0x01 << 1)
+#define DEEP_SLEEP_BEGIN_BIT (0x01 << 2)
+
+#define I2C_SCL_GPIO CONFIG_I2C_SCL_IO
+#define I2C_SDA_GPIO CONFIG_I2C_SDA_IO
+
 static QueueHandle_t xStorageQueue = NULL;
 static QueueHandle_t xSyncQueue = NULL;
-static QueueHandle_t xMpu6050DataQueue = NULL;
 static QueueHandle_t xHx711DataQueue = NULL;
 static QueueHandle_t xBatteryLevelQueue = NULL;
-/* Queues para ahorro de energia */
-static QueueHandle_t xLatestHydrationTimestampQueue = NULL;
-static QueueHandle_t xBleAdvertisingStartTime = NULL;
-/* Tasks que reciben notificaciones por ahorro de energia */
+/* Handles para tasks */
 static TaskHandle_t xCommunicationTask = NULL;
 static TaskHandle_t xStorageTask = NULL;
 static TaskHandle_t xHydrationInferenceTask = NULL; 
-static TaskHandle_t xWeightMeasurementTask = NULL; 
 
-// 9:54 - 2037 mV
-// 10:25 - 2020 mV
+static EventGroupHandle_t xDeepSleepConditionEvents = NULL;
+
+static mpu_handle_t xMpuSensor = NULL;
 
 TimerHandle_t power_mgmt_timer_handle = NULL;
-// static const TickType_t power_management_period_ticks = pdMS_TO_TICKS(15 * 1000);
-static const TickType_t power_management_period_ticks = pdMS_TO_TICKS(1 * 60 * 1000);
+static const TickType_t power_management_period_ticks = pdMS_TO_TICKS(CONFIG_PWR_MANAGER_EXECUTE_PERIOD_MS);
 static const TickType_t device_shutdown_timeout_ticks = pdMS_TO_TICKS(3 * 1000);
 
 static esp_err_t battery_monitor_status = ESP_FAIL;
+
+typedef struct {
+    BaseType_t useLazyBleEnable;
+} communication_task_param_t;
 
 /* Tasks de FreeRTOS */
 static void storage_task(void* pvParameters);
 static void hydration_inference_task(void* pvParameters);
 static void communication_task(void* pvParameters);
-static void mpu6050_measurement_task(void* pvParameters);
-static void hx711_measurement_task(void* pvParameters);
 
 /* Callbacks de timers */
-static void battery_monitor_timer_callback(TimerHandle_t xTimer);
-static void power_management_timer_callback(TimerHandle_t xTimer);
+static void battery_monitor_callback(TimerHandle_t xTimer);
+static void power_management_callback(TimerHandle_t xTimer);
 
 /* Funciones */
-static esp_err_t send_record_to_sync(const hydration_record_t* hydrationRecord, bool* sentToStorage);
+static esp_err_t send_record_to_sync(const hydration_record_t* const hydrationRecord);
 static esp_err_t sync_records_from_storage(const nvs_handle_t storageHandle);
-static esp_err_t transfer_storage_queue_to_sync(void);
+static esp_err_t sync_next_record_with_ble();
+static esp_err_t transfer_hydration_records_from_queue(const QueueHandle_t source, const QueueHandle_t target, int32_t max_count, const TickType_t xTicksToWait);
 static esp_err_t store_pending_records(const nvs_handle_t storageHandle);
+static void get_comm_task_params(communication_task_param_t* const out_params, void* const pvParameters);
 
 static esp_err_t hx711_setup(void);
 static void IRAM_ATTR hx711_data_isr_handler(void* arg);
 
-static void init_power_management(void);
+static esp_err_t i2c_setup(void);
+static esp_err_t mpu_setup(void);
+static void IRAM_ATTR mpu_data_rdy_isr(void* arg);
+
+static mpu6050_config_t mpu_config = {
+    .i2c_port_num = I2C_NUM_0,
+    .address = CONFIG_MPU_I2C_ADDRESS,
+    .enabled_interrupts = MPU_INT_DATA_RDY_BIT,
+    .mpu_int = CONFIG_MPU_INT_GPIO,
+    .isr_handler = mpu_data_rdy_isr,
+    .min_read_interval_us = CONFIG_MPU_DATA_SAMPLE_INTERVAL_MS
+};
+
+static void log_sensor_measurements(const sensor_measures_t* const measurements);
+
+static void init_power_management(BaseType_t* const wakeupFromEXT);
+static BaseType_t are_deep_sleep_conditions_met(void);
+static BaseType_t is_notify_for_deep_sleep_start(uint32_t notifyValue);
+
 static void init_battery_monitoring(void);
-static esp_err_t app_startup(void);
+
+static esp_err_t app_startup(communication_task_param_t* const outCommunicationTaskParams);
 
 /* Main app entry point */
 void app_main(void)
@@ -96,17 +123,14 @@ void app_main(void)
     ESP_LOGI(TAG, "Memoria heap disponible = %u bytes", esp_get_minimum_free_heap_size());
     vTaskDelay(pdMS_TO_TICKS(STARTUP_DELAY_MS));
 
-    esp_err_t setup_status = app_startup();
+    static communication_task_param_t comm_task_params = {};
+    esp_err_t setup_status = app_startup(&comm_task_params);
 
     if (ESP_OK == setup_status) 
     {      
         xTaskCreatePinnedToCore(storage_task, "storage_task", 2048, NULL, 3, &xStorageTask, APP_CPU_NUM);
-        xTaskCreatePinnedToCore(hydration_inference_task, "hydr_infer_task", 2048, NULL, 3, &xHydrationInferenceTask, APP_CPU_NUM);
-        xTaskCreatePinnedToCore(communication_task, "comm_sync_task", 4096, NULL, 4, &xCommunicationTask, APP_CPU_NUM);
-        xTaskCreatePinnedToCore(mpu6050_measurement_task, "meas_mpu6050_task", 2048, NULL, 3, NULL, APP_CPU_NUM);
-        // xTaskCreatePinnedToCore(hx711_measurement_task, "meas_hx711_task", 2048, NULL, 3, &xWeightMeasurementTask, APP_CPU_NUM);
-
-        ESP_LOGI(TAG, "Memoria heap disponible = %u bytes", esp_get_minimum_free_heap_size());
+        xTaskCreatePinnedToCore(hydration_inference_task, "hydr_infer_task", 4096, NULL, 3, &xHydrationInferenceTask, APP_CPU_NUM);
+        xTaskCreatePinnedToCore(communication_task, "comm_sync_task", 4096, (void*) &comm_task_params, 4, &xCommunicationTask, APP_CPU_NUM);
 
     } else if (ESP_ERR_NO_MEM == setup_status) {
         ESP_LOGW(
@@ -120,10 +144,13 @@ void app_main(void)
             esp_err_to_name(setup_status)
         );
     }
+
+    ESP_LOGI(TAG, "Memoria heap disponible = %u bytes", esp_get_minimum_free_heap_size());
 }
 
 static void storage_task(void* pvParameters) 
 {
+    static const char* taskTag = "storage_task";
     // Abrir y obtener un handle para almacenamiento.
     nvs_handle_t storageHandle;
 
@@ -135,10 +162,36 @@ static void storage_task(void* pvParameters)
         vTaskDelete(NULL);
     }
 
-    ESP_LOGI(TAG, "NVS inicializado");
+    ESP_LOGI(TAG, "Storage inicializado");
+
+    esp_err_t storageRegisterPwrManagerStatus = add_module_to_notify_before_deep_sleep(taskTag);
+
+    if (ESP_OK != storageRegisterPwrManagerStatus)
+    {
+        ESP_LOGW(TAG, "Unable to register the storage task for energy saver notifications");
+    }
+
+    BaseType_t taskWasNotified = pdFALSE;
+    uint32_t notify_value = 0;
 
     while (true) 
     {
+        taskWasNotified = xTaskNotifyWait((uint32_t) 0, (uint32_t) 0, &notify_value, (TickType_t) 0);
+
+        if (taskWasNotified)
+        {
+            BaseType_t aboutToEnterSleep = is_notify_for_deep_sleep_start(notify_value);
+
+            if (aboutToEnterSleep)
+            {
+                // Close handle for NVS.
+                storage_close(storageHandle);
+
+                set_module_ready_for_deep_sleep(taskTag, true);
+                break;
+            }
+        }
+
         int32_t recordsInStorageQueue = uxQueueMessagesWaiting(xStorageQueue);
 
         // Revisar el estado de la conexión al dispositivo cliente.
@@ -158,7 +211,8 @@ static void storage_task(void* pvParameters)
         // sincronizarlos.
         if (shouldSync) 
         {
-            esp_err_t queueTransferStatus = transfer_storage_queue_to_sync();
+            ESP_LOGI(TAG, "Transfiriendo registros de hidratacion de xStorageQueue a xSyncQueue");
+            esp_err_t queueTransferStatus = transfer_hydration_records_from_queue(xStorageQueue, xSyncQueue, MAX_RECORD_QUEUE_LEN, pdMS_TO_TICKS(50));
 
             if (ESP_OK != queueTransferStatus) 
             {
@@ -184,37 +238,103 @@ static void storage_task(void* pvParameters)
         vTaskDelay(pdMS_TO_TICKS(RECORD_RECEIVE_TIMEOUT_MS));
     }
 
-    // Close handle for NVS.
-    storage_close(storageHandle);
-
     vTaskDelete(NULL);
 }
 
 static void hydration_inference_task(void* pvParameters) 
 {
-    int32_t num_of_records_sent_for_sync = 0;
-    int32_t numRecordsSentForStorage = 0; 
+    static const char* taskTag = "hydr_inf";
 
-    static const TickType_t waitForReadingsTimeoutTicks = pdMS_TO_TICKS(10000);
+    static BaseType_t auxTestRecordCreated = pdFALSE;
+
+    static const TickType_t waitForDataTimeoutTicks = pdMS_TO_TICKS(1000);
+    static const TickType_t dataReadIntervalTicks = pdMS_TO_TICKS(200);
 
     static sensor_measures_t readingsBuffer[MAX_SENSOR_DATA_BUF_LEN] = {};
     size_t indexOfLatestSensorReadings = 0;
 
+    static int64_t maxPeriodWithNoHydrationUs = 30000000LL;
+    int64_t timestampOfLastHydrationUs = esp_timer_get_time();
+
+    esp_err_t pwrManagerAddStatus = add_module_to_notify_before_deep_sleep(taskTag);
+
+    if (ESP_OK != pwrManagerAddStatus)
+    {
+        ESP_LOGW(TAG, "Unable to register hydration inference task for power manager notifications");
+    }
+
     while (true) 
     {
+        uint32_t notifyValue = 0L;
+        BaseType_t taskWasNotified = xTaskNotifyWait(
+            (uint32_t) 0,
+            (uint32_t) MPU_INTERRUPT_BIT | HX711_INTERRUPT_BIT,
+            &notifyValue,
+            waitForDataTimeoutTicks 
+        );
+
+        BaseType_t aboutToEnterSleep = is_notify_for_deep_sleep_start(notifyValue);
+
+        if (aboutToEnterSleep)
+        {
+            if (NULL != xMpuSensor)
+            {
+                esp_err_t disableMpuInterruptsStatus = mpu6050_disable_interrupts(xMpuSensor, MPU_INT_DATA_RDY_BIT);
+
+                esp_err_t motionEnableStatus = mpu6050_enable_motion_detect(xMpuSensor, &mpu_config);
+
+                if (ESP_OK != motionEnableStatus)
+                {
+                    ESP_LOGW(TAG, "Error enabling motion detection (%s)", esp_err_to_name(motionEnableStatus));
+                }
+            }
+
+            esp_err_t shutdownConfirmStatus = set_module_ready_for_deep_sleep(taskTag, true);
+
+            if (ESP_OK != shutdownConfirmStatus)
+            {
+                ESP_LOGW(TAG, "Could not notify that hydr inference task is ready for sleep");
+            }
+
+            break;
+        }
+
+        BaseType_t mpuWasInterrupted = (taskWasNotified && (notifyValue & MPU_INTERRUPT_BIT) == MPU_INTERRUPT_BIT);
+        BaseType_t mpuHasData = pdFALSE;
+
+        if (mpuWasInterrupted && NULL != xMpuSensor)
+        {
+            uint8_t interrupt_status = 0x00;
+            mpu6050_read_interrupt_status(xMpuSensor, &interrupt_status);
+
+            ESP_LOGI(TAG, "MPU6050 interrupt status %0X", interrupt_status);
+
+            if (mpu6050_is_intr_for_data(interrupt_status))
+            {
+                mpu6050_measures_t mpuData = {};
+                esp_err_t read_status = mpu6050_get_measurements(xMpuSensor, &mpuData);
+
+                mpuHasData = ESP_OK == read_status;
+
+                if (mpuHasData)
+                {
+                    readingsBuffer[indexOfLatestSensorReadings].accel_gyro_measurements = mpuData;
+                }
+            }
+
+            if (mpu6050_is_intr_for_motion(interrupt_status))
+            {
+                ESP_LOGI(TAG, "MPU detected motion");
+            }
+        }
+
         BaseType_t hx711_data_available = xQueueReceive(
             xHx711DataQueue,
             &(readingsBuffer[indexOfLatestSensorReadings].weight_measurements),
-            waitForReadingsTimeoutTicks
-        );
-
-        BaseType_t mpu6050_measurements_received = xQueueReceive(
-            xMpu6050DataQueue,
-            &(readingsBuffer[indexOfLatestSensorReadings].accel_gyro_measurements),
             (TickType_t) 0
         );
 
-        bool sensor_measurements_available = pdPASS == hx711_data_available;
+        bool sensor_measurements_available = true;
 
         if (sensor_measurements_available) 
         {
@@ -222,35 +342,30 @@ static void hydration_inference_task(void* pvParameters)
 
             sensor_measures_t latest_sensor_data = readingsBuffer[indexOfLatestSensorReadings];
 
-            ESP_LOGI(TAG, "Timestamp de datos de sensores: %lld", latest_sensor_data.timestamp_ms);
-
-            ESP_LOGI(
-                TAG, 
-                "Lecturas de HX711: { raw_weight: %d, volume_ml: %u, timestamp: %lld }", 
-                latest_sensor_data.weight_measurements.raw_weight, latest_sensor_data.weight_measurements.volume_ml,
-                latest_sensor_data.weight_measurements.timestamp_ms
-            );
-
-            ESP_LOGI(
-                TAG, 
-                "Lecturas de MPU6050: { accel: (%.2f, %.2f, %.2f), gyro: (%.2f, %.2f, %.2f), temp: %.2f }", 
-                latest_sensor_data.accel_gyro_measurements.acceleration.x, latest_sensor_data.accel_gyro_measurements.acceleration.y, latest_sensor_data.accel_gyro_measurements.acceleration.z, 
-                latest_sensor_data.accel_gyro_measurements.gyroscope.x, latest_sensor_data.accel_gyro_measurements.gyroscope.y, latest_sensor_data.accel_gyro_measurements.gyroscope.z, 
-                latest_sensor_data.accel_gyro_measurements.temperature
-            );
+            log_sensor_measurements(&latest_sensor_data);
 
             hydration_record_t hydrationRecord = {};
             
             // Algoritmo para determinar si las mediciones en readingsBuffer
             // son indicativas de consumo de agua.
             // bool was_hydration_recorded = hydration_record_from_measures(readingsBuffer, MAX_SENSOR_DATA_BUF_LEN, &hydrationRecord);
-            bool was_hydration_recorded = false;
+            bool was_hydration_recorded = !auxTestRecordCreated;
             // ESP_LOGI(TAG, "Do measures represent hydration: %s", (was_hydration_recorded ? "yes" : "no" ));
+
+            EventBits_t sleepConditionStatus = xEventGroupWaitBits(
+                xDeepSleepConditionEvents, 
+                NO_RECENT_HYDRATION_BIT,
+                pdFALSE,
+                pdTRUE,
+                (TickType_t) 0
+            );
+            BaseType_t shouldNotifyNoRecentHydration = ((sleepConditionStatus & NO_RECENT_HYDRATION_BIT) != NO_RECENT_HYDRATION_BIT);
 
             if (was_hydration_recorded) 
             {
-                int64_t ms_since_boot = esp_timer_get_time() * 1000LL;
-                xQueueOverwrite(xLatestHydrationTimestampQueue, &ms_since_boot);
+                hydrationRecord = create_random_record();
+
+                timestampOfLastHydrationUs = esp_timer_get_time();
                 
                 // Obtener la carga restante de la batería, para asociarla
                 // con el registro de hidratación.
@@ -266,53 +381,34 @@ static void hydration_inference_task(void* pvParameters)
                 {
                     hydrationRecord.battery_level = battery_measurement.remaining_charge; 
                 }
+                
+                auxTestRecordCreated = pdTRUE;
+                esp_err_t sendRecordStatus = send_record_to_sync(&hydrationRecord);
 
-                bool wasRecordStored = false;
-
-                esp_err_t status = send_record_to_sync(&hydrationRecord, &wasRecordStored);
-
-                char* targetMsg = "sincronizacion";
-
-                if (ESP_OK == status) 
+                if (ESP_OK != sendRecordStatus) 
                 {            
-                    if (wasRecordStored) 
-                    {
-                        targetMsg = "almacenamiento";
-                        ++numRecordsSentForStorage;
-                    } else 
-                    {
-                        ++num_of_records_sent_for_sync;
-                    }
+                    ESP_LOGW(TAG, "Error sending hydration record to sync (%s)", esp_err_to_name(sendRecordStatus));
                 }
-
-                int32_t totalRecordsSent = numRecordsSentForStorage + num_of_records_sent_for_sync;
-
-                if (ESP_OK == status) 
+            } else if (shouldNotifyNoRecentHydration)
+            {
+                if (esp_timer_get_time() > (timestampOfLastHydrationUs + maxPeriodWithNoHydrationUs)) 
                 {
-                    ESP_LOGI(
-                        TAG, 
-                        "Nuevo registro de hidratacion enviado para %s, total %d", 
-                        targetMsg, 
-                        totalRecordsSent
-                    );
-                } else {
-                    ESP_LOGW(
-                        TAG, 
-                        "Un nuevo registro %d no pudo ser enviado para %s (errQUEUE_FULL)",
-                        totalRecordsSent,
-                        targetMsg
-                    );
+                    ESP_LOGI(TAG, "%lld + %lld > %lld", timestampOfLastHydrationUs, maxPeriodWithNoHydrationUs, esp_timer_get_time());
+
+                    ESP_LOGI(TAG, "Pasaron mas de %lld us sin un registro de hidratacion", maxPeriodWithNoHydrationUs);
+                    EventBits_t resultBits = xEventGroupSetBits(xDeepSleepConditionEvents, NO_RECENT_HYDRATION_BIT);
+
+                    if ((resultBits & NO_RECENT_HYDRATION_BIT) != NO_RECENT_HYDRATION_BIT)
+                    {
+                        ESP_LOGW(TAG, "El bit NO_RECENT_HYDRATION_BIT de eventos de deep sleep no fue set");
+                    }
                 }
             }
             
-            ++indexOfLatestSensorReadings;
-            indexOfLatestSensorReadings = (indexOfLatestSensorReadings >= MAX_SENSOR_DATA_BUF_LEN)
-                ? indexOfLatestSensorReadings % MAX_SENSOR_DATA_BUF_LEN
-                : indexOfLatestSensorReadings;
-
-        } else {
-            ESP_LOGW(TAG, "No hay mediciones de sensores para generar registros de hidratacion");
+            indexOfLatestSensorReadings = (indexOfLatestSensorReadings + 1) % MAX_SENSOR_DATA_BUF_LEN;
         }
+
+        vTaskDelay(dataReadIntervalTicks);
     }
 
     vTaskDelete(NULL);
@@ -320,98 +416,107 @@ static void hydration_inference_task(void* pvParameters)
 
 static void communication_task(void* pvParameters)
 {
-    // El watchdog para evitar sincronizar registros infinitamente.
+    communication_task_param_t* params = &((communication_task_param_t) {});
+    get_comm_task_params(params, pvParameters);
+
+    static const char* taskTag = "communication_task";
+
+    static int32_t advAttemptCount = 0;
+    int64_t advStartedTimestampUs = 0;
+    int64_t advEndTimestampUs = 0;
+
+    static const uint32_t taskDelayTicks = pdMS_TO_TICKS(500);
+    static const TickType_t FAILED_INIT_RETRY_DELAY = pdMS_TO_TICKS(1000);
+
+    // El valor "watchdog" para evitar sincronizar registros infinitamente.
     static const uint16_t maxRecordsToSync = MAX_SYNC_QUEUE_LEN + MAX_STORED_RECORD_COUNT;
-    static const uint16_t MAX_SYNC_ATTEMPTS = 5;
+    static const uint16_t MAX_SYNC_ATTEMPTS = 3;
     static const TickType_t SYNC_FAILED_BACKOFF_DELAY = pdMS_TO_TICKS(5000);
 
-    static const uint32_t waitForPairedStatusTimeoutMS = 5000;
-    static const uint32_t recordReadTimeoutMS = 10 * 1000; 
+    esp_err_t ble_init_status = ESP_FAIL;
 
-    static const char* communication_task_tag = "communication_task";
+    if (!params->useLazyBleEnable)
+    {
+        ble_init_status = ble_driver_init(CONFIG_BLE_DEVICE_NAME);
 
-    hydration_record_t xRecordToSync = { 0, 0, 0, 0 };
-
-    // Intentar inicializar el driver BLE.
-    esp_err_t ble_init_status = ble_driver_init("Hydrate-0001");
-
-    if (NULL == xSyncQueue || ble_init_status != ESP_OK)  {
-        // Error fatal, terminar inmediatamente este task.
-        ESP_LOGE(TAG, "Error de inicializacion del driver de BLE (%s)", esp_err_to_name(ble_init_status));
-        vTaskDelete(NULL);
+        if (NULL == xSyncQueue || ble_init_status != ESP_OK)  {
+            ESP_LOGE(TAG, "Error de inicializacion del driver de BLE (%s)", esp_err_to_name(ble_init_status));
+        }
     }
 
-    esp_err_t ble_energy_saver_add_status = add_module_to_notify_before_deep_sleep(communication_task_tag);
+    esp_err_t bleRegisterPwrManagerStatus = add_module_to_notify_before_deep_sleep(taskTag);
 
-    if (ESP_OK != ble_energy_saver_add_status)
+    if (ESP_OK != bleRegisterPwrManagerStatus)
     {
         ESP_LOGW(TAG, "Unable to register the communication task for energy saver notifications");
     }
 
+    BaseType_t taskWasNotified = pdFALSE;
+    uint32_t notify_value = 0;
+    BaseType_t aboutToEnterSleep = pdFALSE;
+    esp_err_t bleShutdownStatus = ESP_OK;
+
+    static ble_status_t ble_pair_status = INACTIVE;
+    static BaseType_t did_status_change = pdFALSE;
+
     while (true) 
     {
-        ble_status_t status = ble_wait_for_state(PAIRED, true, waitForPairedStatusTimeoutMS);
+        int32_t numOfRecordsPendingSync = uxQueueMessagesWaiting(xSyncQueue);
 
-        bool isPaired = PAIRED == status;
+        taskWasNotified = xTaskNotifyWait((uint32_t) 0, (uint32_t) 0, &notify_value, (TickType_t) 0);
 
-        if (isPaired) {
+        if (taskWasNotified)
+        {
+            aboutToEnterSleep = is_notify_for_deep_sleep_start(notify_value);
+        }
 
-            int16_t synchronizedRecordsCount = 0;
-            int16_t syncAttemptsForCurrentRecord = 0;
+        ble_status_t previous_ble_status = ble_pair_status;
+        ble_pair_status = ble_wait_for_state(PAIRED, true, (TickType_t) 0);
+        did_status_change = previous_ble_status != ble_pair_status;
 
-            int32_t totalRecordsPendingSync = uxQueueMessagesWaiting(xSyncQueue);
+        if (ESP_OK == ble_init_status)
+        {
+            if (PAIRED == ble_pair_status) 
+            {
+                if (taskWasNotified && aboutToEnterSleep)
+                {
+                    bleShutdownStatus = ble_disconnect();
 
-            BaseType_t hasRemainingRecordsToSync = totalRecordsPendingSync > 0;
+                    if (ESP_OK == bleShutdownStatus)
+                    {
+                        continue;
+                    } else 
+                    {
+                        ESP_LOGW(TAG, "Error al desconectar BLE (%s)", esp_err_to_name(bleShutdownStatus));
+                    }
+                }
 
-            // Iterar mientras la extensión esté PAIRED, queden registros de hidratación 
-            // por sincronizar, los intentos de sincronización no superen a MAX_SYNC_ATTEMPTS
-            //  y la cuenta total de registros sincronizados no supere a maxRecordsToSync.      
-            while (isPaired && hasRemainingRecordsToSync && 
-                   syncAttemptsForCurrentRecord < MAX_SYNC_ATTEMPTS && synchronizedRecordsCount < maxRecordsToSync
-            ) {
-                // Obtener el siguiente registro por sincronizar, sin removerlo 
-                // de la queue (un registro es removido hasta que haya sincronizado
-                // con éxito).
-                // Esta operación debería ser prácticamente instantánea, porque 
-                // hasRecordsToSync es pdTRUE y esta es la única task que puede 
-                // recibir elementos de xSyncQueue.
-                BaseType_t wasRecordReceived = xQueuePeek(
-                    xSyncQueue, 
-                    &( xRecordToSync ), 
-                    pdMS_TO_TICKS(1000) //TODO: determinar si este timeout es necesario.
-                );
+                int16_t synchronizedRecordsCount = 0;
+                int16_t syncAttemptsForCurrentRecord = 0;
 
-                if (wasRecordReceived) {
-                    // El registro de hidratación fue recibido con éxito desde
-                    // xSyncQueue. Es posible sincronizarlo a través de BLE.
+                int32_t totalRecordsPendingSync = uxQueueMessagesWaiting(xSyncQueue);
 
-                    // El modificar el perfil GATT BLE con los datos del
-                    // registro de hidratación. Bloquear esta task por un 
-                    // momento, hasta que el cliente confirme que obtuvo el registro o
-                    // timeout expire. 
-                    esp_err_t sync_status = ble_synchronize_hydration_record(&xRecordToSync, recordReadTimeoutMS);
+                BaseType_t hasRemainingRecordsToSync = totalRecordsPendingSync > 0;
 
-                    // Determinar si el registro pudo ser sincronizado, según sync_status:
-                    if (ESP_OK == sync_status) {
+                // Iterar mientras la extensión esté PAIRED, queden registros de hidratación 
+                // por sincronizar, los intentos de sincronización no superen a MAX_SYNC_ATTEMPTS
+                //  y la cuenta total de registros sincronizados no supere a maxRecordsToSync.      
+                while (PAIRED == ble_pair_status && hasRemainingRecordsToSync && 
+                    syncAttemptsForCurrentRecord < MAX_SYNC_ATTEMPTS && synchronizedRecordsCount < maxRecordsToSync
+                ) {
+                    esp_err_t sync_status = sync_next_record_with_ble();
+
+                    if (ESP_OK == sync_status)
+                    {
                         // El registro de hidratación fue recibido por el
                         // cliente con éxito. Indicarlo con una variable "bandera":
                         ++synchronizedRecordsCount;
                         syncAttemptsForCurrentRecord = 0;
 
-                        // Si el registro pudo ser sincronizado y recibido por
-                        // el cliente, removerlo de xSyncQueue para señalizar
-                        // que ya no es necesario mantenerlo.
-                        xQueueReceive(
-                            xSyncQueue,
-                            &( xRecordToSync ), 
-                            pdMS_TO_TICKS(1000) //TODO: determinar si este timeout es necesario.
-                        );
-
-                        ESP_LOGI(TAG, "Registro obtenido por el dispositivo periferico, restantes = %i", (totalRecordsPendingSync - synchronizedRecordsCount));
-
-                    } else if (ESP_ERR_TIMEOUT == sync_status) {
-                        // Si el registro no fue obtenido por el dispositivo periférico
-                        // (el timeout expiró sin confirmación), incrementar la cuenta de intentos.
+                        ESP_LOGI(TAG, "Registro obtenido por el dispositivo periferico, restantes = %i", 
+                                 (totalRecordsPendingSync - synchronizedRecordsCount));
+                    } else if (ESP_ERR_TIMEOUT == sync_status)
+                    {
                         ++syncAttemptsForCurrentRecord;
                         ESP_LOGW(
                             TAG, 
@@ -427,121 +532,146 @@ static void communication_task(void* pvParameters)
                     }
 
                     // Revisar si el dispotivo periférico todavía está emparejado.
-                    ble_status_t status = ble_wait_for_state(PAIRED, true, 0);
-                    isPaired = PAIRED == status;
+                    ble_pair_status = ble_wait_for_state(PAIRED, true, 0);
 
                     hasRemainingRecordsToSync = synchronizedRecordsCount < totalRecordsPendingSync;
                 }
+
+                if (syncAttemptsForCurrentRecord >= MAX_SYNC_ATTEMPTS) {
+                    vTaskDelay(SYNC_FAILED_BACKOFF_DELAY);
+                    syncAttemptsForCurrentRecord = 0;
+                }
+            } else if (ADVERTISING == ble_pair_status)
+            {
+                if (did_status_change)
+                {
+                    advStartedTimestampUs = esp_timer_get_time();
+                    ++advAttemptCount;
+
+                    if (advAttemptCount == 1)
+                    {
+                        advEndTimestampUs = advStartedTimestampUs + (CONFIG_BLE_FIRST_ADV_DURATION_MS * 1000);
+                    } else 
+                    {
+                        advEndTimestampUs = advStartedTimestampUs + (CONFIG_BLE_ADDITIONAL_ADV_DURATION_MS * 1000);
+                    }
+                }
+
+                if (taskWasNotified && aboutToEnterSleep && ESP_OK == bleShutdownStatus)
+                {
+                    bleShutdownStatus = ble_stop_advertising();
+
+                    if (ESP_OK != bleShutdownStatus)
+                    {
+                        ESP_LOGW(TAG, "Error al detener advertising BLE (%s)", esp_err_to_name(bleShutdownStatus));
+                    }
+                }
+
+                BaseType_t advAttemptLimitReached = advAttemptCount > (1 + CONFIG_BLE_ADDITIONAL_ADV_ATTEMPT_COUNT);
+
+                if (advAttemptLimitReached)
+                {
+                    ESP_LOGI(TAG, "BLE advertise attempt limit reached");
+                    if (NULL != xDeepSleepConditionEvents)
+                    {
+                        xEventGroupSetBits(xDeepSleepConditionEvents, BLE_INACTIVE_BIT);
+                    }
+                } else if (esp_timer_get_time() > advEndTimestampUs)
+                {
+                    ESP_LOGI(TAG, "Timeout de advertising BLE alcanzado: %lld > %lld", esp_timer_get_time(), advEndTimestampUs);
+                    // Ya pasó más de la duración esperada del advertising, pero 
+                    // no el limite de intentos. Entrar en light sleep.
+                    // esp_err_t ble_shutdown_status = ble_driver_shutdown();
+                    esp_err_t ble_shutdown_status = ESP_OK;
+
+                    if (ESP_OK == ble_shutdown_status)
+                    {
+                        ESP_LOGI(TAG, "Transfiriendo registros de hidratacion de xSyncQueue a xStorageQueue");
+                        ble_shutdown_status = transfer_hydration_records_from_queue(
+                            xSyncQueue, 
+                            xStorageQueue,
+                            MAX_RECORD_QUEUE_LEN, 
+                            pdMS_TO_TICKS(50)
+                        );
+                    }
+                    
+                    if (ESP_OK == ble_shutdown_status) 
+                    {
+                        ble_shutdown_status = ble_stop_advertising();
+                    }
+
+                    if (ESP_OK != ble_shutdown_status)
+                    {
+                        ESP_LOGW(TAG, "Error al detener advertising BLE (%s)", esp_err_to_name(ble_shutdown_status));
+                    }
+
+                    if (ESP_OK == ble_shutdown_status)
+                    {
+                        ble_shutdown_status = ble_driver_shutdown();
+                    }
+
+                    if (ESP_OK == ble_shutdown_status)
+                    {
+                        ESP_LOGI(TAG, "Starting light sleep on BLE advertising timeout");
+                        // esp_err_t light_sleep_status = enter_light_sleep(CONFIG_BLE_ADVERTISING_SLEEP_INTERVAL_MS * 1000ULL);
+
+                        // if (ESP_OK != light_sleep_status)
+                        // {
+                        //     ESP_LOGW(TAG, "Error al intentar entrar en light sleep (%s)", esp_err_to_name(light_sleep_status));
+                        // }
+                    }
+
+                    // TODO: reiniciar advertising después de 1min. de light sleep.
+                }
             }
 
-            if (syncAttemptsForCurrentRecord >= MAX_SYNC_ATTEMPTS) {
-                vTaskDelay(SYNC_FAILED_BACKOFF_DELAY);
-                syncAttemptsForCurrentRecord = 0;
+        } else if (params->useLazyBleEnable == pdFALSE || numOfRecordsPendingSync > 0)
+        {
+            ESP_LOGI(TAG, "BLE late init");
+            ble_init_status = ble_driver_init(CONFIG_BLE_DEVICE_NAME);
+
+            if (NULL == xSyncQueue || ble_init_status != ESP_OK)  {
+                ESP_LOGE(TAG, "Error de inicializacion del driver de BLE (%s)", esp_err_to_name(ble_init_status));
+                vTaskDelay(FAILED_INIT_RETRY_DELAY);
             }
         }
 
-        if (ESP_OK == ble_init_status)
+        if (taskWasNotified && aboutToEnterSleep && ESP_OK == bleShutdownStatus)
         {
-            uint32_t notify_value = 0;
-            BaseType_t power_mgmt_notify_received = xTaskNotifyWait(0, ULONG_MAX, &notify_value, (TickType_t) 0);
-
-            if (pdPASS == power_mgmt_notify_received)
+            // Shutdown BLE
+            if (ESP_OK == ble_init_status)
             {
-                ESP_LOGI(TAG, "A power management notification was received by communications task. Notify value is %u", notify_value);
-
-                if (isPaired) 
+                if (ESP_OK == bleShutdownStatus)
                 {
-                    //TODO: desconectar BLE
-                } 
-
-                esp_err_t ble_shutdown_status = ble_driver_shutdown();
-
-                if (ESP_OK != ble_shutdown_status)
-                {
-                    ESP_LOGW(TAG, "Error al intentar detener el task de BLE: %s", esp_err_to_name(ble_shutdown_status));
-                } else 
-                {
-                    esp_err_t shutdown_notify_status = set_module_ready_for_deep_sleep(communication_task_tag, true);
-
-                    if (ESP_OK != shutdown_notify_status) 
-                    {
-                        ESP_LOGW(TAG, "Could not set Hx711 task is ready for deep sleep");
-                    }
+                    bleShutdownStatus = ble_driver_shutdown();
                 }
+
+                if (ESP_OK == bleShutdownStatus)
+                {
+                    bleShutdownStatus = ble_driver_deinit();
+                }
+
+                if (ESP_OK != bleShutdownStatus)
+                {
+                    ESP_LOGW(TAG, "Error al de-inicializar BLE (%s)", esp_err_to_name(bleShutdownStatus));
+                }
+            }
+
+            bleShutdownStatus = set_module_ready_for_deep_sleep(taskTag, true);
+
+            if (ESP_OK == bleShutdownStatus)
+            {
+                // Terminar la ejecución de la task, ya que va a entrar en 
+                // deep sleep.
+                break;
             }
         }
 
         // Esperar un momento antes de volver a revisar el estado de 
         // la conexión, evitar acaparar todo el tiempo del scheduler 
         // en revisar la conexion.
-        vTaskDelay(pdMS_TO_TICKS(250));
+        vTaskDelay(taskDelayTicks);
     }
-
-    vTaskDelete(NULL);
-}
-
-static void mpu6050_measurement_task(void* pvParameters) 
-{
-    static TickType_t measurementIntervalMs = pdMS_TO_TICKS(1000 / NUM_SENSOR_MEASURES_PER_SECOND);
-    static TickType_t mpu6050_init_retry_timeout_ms = 1000;
-
-    esp_err_t mpu6050_init_status = ESP_FAIL;
-
-    while (ESP_OK != mpu6050_init_status)
-    {
-        mpu6050_init_status = mpu6050_init(true);
-
-        if (ESP_OK != mpu6050_init_status) 
-        {
-            ESP_LOGW(TAG, "Error de inicializacion de MPU6050 (%s), reintentando en %.2fs", esp_err_to_name(mpu6050_init_status), mpu6050_init_retry_timeout_ms / 1000.0f);
-            vTaskDelay(pdMS_TO_TICKS(mpu6050_init_retry_timeout_ms));
-        }
-    }
-
-    ESP_LOGI(TAG, "Status del sensor MPU6050 (%s)", esp_err_to_name(mpu6050_init_status));
-
-    if (ESP_OK == mpu6050_init_status)
-    {
-        uint8_t mpu6050_deviceid;
-        mpu6050_get_i2c_id(&mpu6050_deviceid);
-        ESP_LOGI(TAG, "Id I2C del sensor MPU6050 = %2x", mpu6050_deviceid);
-    }
-
-    esp_err_t mpu6050_read_status = ESP_OK;
-    mpu6050_measures_t mpu6050_data = {};
-
-    while (true) 
-    {
-        if (ESP_OK == mpu6050_init_status) 
-        {
-            // Obtener mediciones del MPU6050.
-            mpu6050_read_status = mpu6050_get_measurements(&mpu6050_data);
-
-            if (ESP_OK != mpu6050_read_status) 
-            {
-                ESP_LOGW(TAG, "Error al intentar obtener datos del MPU6050 (%s)", esp_err_to_name(mpu6050_read_status));
-            }
-        }
-
-        if (ESP_OK == mpu6050_read_status && NULL != xMpu6050DataQueue) 
-        {
-            BaseType_t dataWasSent = xQueueSendToBack(
-                xMpu6050DataQueue,
-                &mpu6050_data,
-                (TickType_t) 0
-            );
-
-            if (!dataWasSent) {
-                ESP_LOGW(TAG, "Las lecturas del sensor MPU6050 no pudieron ser enviadas");
-            }
-        } else {
-            ESP_LOGW(TAG, "Something went wrong while getting sensor readings (mpu6050 %s) (xMpu6050DataQueue != NULL ? %d)", esp_err_to_name(mpu6050_read_status), (xMpu6050DataQueue != NULL));
-        }
-
-        vTaskDelay(measurementIntervalMs);
-    }
-
-    mpu6050_free_resources(true);
 
     vTaskDelete(NULL);
 }
@@ -561,7 +691,7 @@ static esp_err_t hx711_setup(void)
 
     if (ESP_OK != hx711_init_status)
     {
-        ESP_LOGI(TAG, "HX711 sensor status (%s)", esp_err_to_name(hx711_init_status));
+        ESP_LOGW(TAG, "HX711 sensor status (%s)", esp_err_to_name(hx711_init_status));
     }
 
     return hx711_init_status;
@@ -590,104 +720,106 @@ static void IRAM_ATTR hx711_data_isr_handler(void* arg)
     }
 }
 
-static void hx711_measurement_task(void* pvParameters)
+static esp_err_t i2c_setup(void)
 {
-    static const TickType_t hx711_measure_period_ticks = pdMS_TO_TICKS(500);
-    static const size_t hx711_read_timeout_ms = 125;
-    static const char* hx711_task_tag = "HX711";
-
-    static hx711_t hx711_sensor = {
-        .data_out = CONFIG_HX711_DATA_OUT_GPIO,
-        .pd_sck = CONFIG_HX711_PD_SCK_GPIO,
-        .gain = HX711_GAIN_A_64,
+    i2c_config_t i2c_bus_config = {
+        .mode = I2C_MODE_MASTER,
+        .sda_io_num = I2C_SDA_GPIO,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_io_num = I2C_SCL_GPIO,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master.clk_speed = CONFIG_I2C_MASTER_FREQ_HZ,
+        .clk_flags = I2C_SCLK_SRC_FLAG_FOR_NOMAL,
     };
 
-    esp_err_t hx711_init_status = ESP_FAIL;
+    esp_err_t i2c_init_status = ESP_OK; 
 
-    esp_err_t hx711_energy_saver_add_status = add_module_to_notify_before_deep_sleep(hx711_task_tag);
-
-    if (ESP_OK != hx711_energy_saver_add_status)
+    if (ESP_OK == i2c_init_status) 
     {
-        ESP_LOGW(TAG, "Unable to register the HX711 task for energy saver notifications");
+        i2c_init_status = i2c_param_config(I2C_NUM_0, &i2c_bus_config);
+
+        if (i2c_init_status != ESP_OK) 
+        {
+            ESP_LOGW(TAG, "I2C initialization error (%s)", esp_err_to_name(i2c_init_status));
+        }
     }
 
-    bool is_hx711_powered_on = (ESP_OK == hx711_init_status);
-    esp_err_t hx711_read_status = ESP_FAIL;
-    hx711_measures_t hx711_measurement = {};
-
-    while (true)
+    if (ESP_OK == i2c_init_status) 
     {
-        if (is_hx711_powered_on && ESP_OK == hx711_init_status) 
+        i2c_init_status = i2c_driver_install(I2C_NUM_0, i2c_bus_config.mode, 0, 0, 0);
+
+        if (i2c_init_status != ESP_OK) 
         {
-            hx711_read_status = hx711_get_measurements(&hx711_sensor, &hx711_measurement, hx711_read_timeout_ms);
-
-            if (ESP_ERR_TIMEOUT == hx711_read_status) 
-            {
-                ESP_LOGW(TAG, "HX711 data read timeout");
-            } else if (ESP_OK != hx711_read_status) 
-            {
-                ESP_LOGW(TAG, "HX711 read error (%s)", esp_err_to_name(hx711_read_status));
-            }
-        } 
-
-        if (is_hx711_powered_on && ESP_OK == hx711_read_status && NULL != xHx711DataQueue)
-        {
-            ESP_LOGI(
-                TAG, 
-                "Lecturas de HX711: { raw_weight: %d, volume_ml: %u }", 
-                hx711_measurement.raw_weight, hx711_measurement.volume_ml
-            );
-
-            BaseType_t dataWasSent = xQueueOverwrite(xHx711DataQueue, &hx711_measurement);
-
-            if (!dataWasSent) 
-            {
-                ESP_LOGW(TAG, "Las mediciones del HX711 no pudieron ser escritas en xHx711DataQueue.");
-            }
+            ESP_LOGW(TAG, "I2C initialization error (%s)", esp_err_to_name(i2c_init_status));
         }
-
-        if (ESP_OK == hx711_init_status)
-        {
-            uint32_t notify_value = 0;
-            BaseType_t power_mgmt_notify_received = xTaskNotifyWait(0, ULONG_MAX, &notify_value, (TickType_t) 0);
-
-            if (pdPASS == power_mgmt_notify_received)
-            {
-                ESP_LOGI(TAG, "A power management notification was received by HX711 task. Notify value is %u", notify_value);
-
-                //TODO: manejar situacion de pwr_mgmt
-                esp_err_t hx711_shutdown_status = hx711_set_power(&hx711_sensor, true);
-
-                is_hx711_powered_on = (ESP_OK != hx711_shutdown_status);
-
-                if (is_hx711_powered_on)
-                {
-                    ESP_LOGW(TAG, "Error al intentar apagar el sensor Hx711: %s", esp_err_to_name(hx711_shutdown_status));
-                } else 
-                {
-                    esp_err_t shutdown_notify_status = set_module_ready_for_deep_sleep(hx711_task_tag, true);
-
-                    if (ESP_OK != shutdown_notify_status) 
-                    {
-                        ESP_LOGW(TAG, "Could not set Hx711 task is ready for deep sleep");
-                    }
-                }
-            }
-        }
-
-        vTaskDelay(hx711_measure_period_ticks);
     }
 
-    vTaskDelete(NULL);
+    return i2c_init_status;
 }
 
-static void battery_monitor_timer_callback(TimerHandle_t xTimer) 
+static esp_err_t mpu_setup(void)
+{
+    esp_err_t mpu_init_status = mpu6050_init(&mpu_config, &xMpuSensor);
+
+    if (ESP_OK != mpu_init_status || xMpuSensor == NULL)
+    {
+        ESP_LOGW(TAG, "MPU6050 init error, status (%s)", esp_err_to_name(mpu_init_status));
+    }
+
+    if (ESP_OK == mpu_init_status)
+    {
+        mpu_init_status = mpu6050_enable_interrupts(xMpuSensor, &mpu_config);
+    }
+
+    return mpu_init_status;
+}
+
+static void IRAM_ATTR mpu_data_rdy_isr(void* arg)
+{
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+
+    if (NULL != xHydrationInferenceTask)
+    {
+        xTaskNotifyFromISR(
+            xHydrationInferenceTask, 
+            MPU_INTERRUPT_BIT, 
+            eSetBits, 
+            &xHigherPriorityTaskWoken
+        );
+    }
+
+    if (xHigherPriorityTaskWoken) 
+    {
+        portYIELD_FROM_ISR();
+    }
+}
+
+static void init_battery_monitoring(void)
+{
+    battery_monitor_status = battery_monitor_init();
+
+    ESP_LOGI(TAG, "Battery monitor status (%s)", esp_err_to_name(battery_monitor_status));
+
+    TimerHandle_t xBatteryMonitorTimer = xTimerCreate(
+        "battery_level_timer",
+        pdMS_TO_TICKS(CONFIG_BATTERY_MEASURE_INTERVAL_MS),
+        pdTRUE,
+        NULL,
+        battery_monitor_callback
+    );
+
+    // Comenzar el timer periodico para obtener mediciones del
+    // nivel de bateria.
+    xTimerStart(xBatteryMonitorTimer, (TickType_t) 0);
+}
+
+static void battery_monitor_callback(TimerHandle_t xTimer) 
 {
     battery_measurement_t battery_measurement = {};
 
     if (ESP_OK != battery_monitor_status) 
     {
-        // Si el sensor de batería no está en un estado correcto, intentar
+        // Si el sensor de batería no está listo para hacer un sample, intentar
         // re-inicializarlo.
         battery_monitor_status = battery_monitor_init();
     }
@@ -696,70 +828,109 @@ static void battery_monitor_timer_callback(TimerHandle_t xTimer)
 
     if (ESP_OK == measure_status) 
     {
-        ble_sync_battery_charge(battery_measurement.remaining_charge);
         xQueueOverwrite(xBatteryLevelQueue, &battery_measurement);
 
         ESP_LOGI(TAG, "Carga restante de la bateria: %d%%", battery_measurement.remaining_charge);
+
+        if (NULL != xDeepSleepConditionEvents)
+        {
+            if (is_battery_low(&battery_measurement))
+            {
+                ESP_LOGI(TAG, "Bateria baja");
+                xEventGroupSetBits(xDeepSleepConditionEvents, LOW_BAT_BIT);
+            } else 
+            {
+                xEventGroupClearBits(xDeepSleepConditionEvents, LOW_BAT_BIT);
+            }
+        }
     }
 } 
 
-static void power_management_timer_callback(TimerHandle_t xTimer) 
+static void init_power_management(BaseType_t* const wakeupFromEXT) 
 {
-    ESP_LOGI(TAG, "Power manager is running");
+    after_wakeup(wakeupFromEXT);
+    set_max_deep_sleep_duration(((int64_t) CONFIG_MAX_DEEP_SLEEP_DURATION_MS) * 1000);
 
-    int32_t deep_sleep_attempt_count = increment_sleep_attempt_count();
-    static const int32_t max_deep_sleep_enter_retry_count = 3;
+    esp_err_t wakeupSourceStatus = setup_wakeup_sources((gpio_num_t) CONFIG_MPU_INT_GPIO);
 
-    static const uint8_t low_bat_threshold = 10; // 10%
-    static const int64_t ble_inactive_threshold_ms = 3 * 60 * 1000; // 3 minutos
-    static const int64_t no_recent_hydration_threshold_ms = 60 * 1000; // 1 minuto
-
-    int64_t latest_hydr_timestamp_ms = 0LL;
-    int64_t ble_advertising_start_ms = 0LL;
-    battery_measurement_t battery_charge_state = {};
-
-    BaseType_t hasHydrationRecordTimestamp = xQueuePeek(xLatestHydrationTimestampQueue, &latest_hydr_timestamp_ms, (TickType_t) 0);
-    BaseType_t hasBleAdvertisingDuration = xQueuePeek(xBleAdvertisingStartTime, &ble_advertising_start_ms, (TickType_t) 0);
-    BaseType_t hasBatteryChargeState = xQueuePeek(xBatteryLevelQueue, &battery_charge_state, (TickType_t) 0);
-
-    int64_t ms_since_boot = esp_timer_get_time() * 1000LL;
-
-    bool is_ble_advertising_inactive = (hasBleAdvertisingDuration == pdPASS) && ((ms_since_boot - ble_advertising_start_ms) > ble_inactive_threshold_ms);
-    bool is_latest_hydration_old = (hasHydrationRecordTimestamp == pdPASS) && ((ms_since_boot - latest_hydr_timestamp_ms) > no_recent_hydration_threshold_ms);
-    bool is_battery_charge_low = (hasBatteryChargeState == pdPASS) && (battery_charge_state.remaining_charge <= low_bat_threshold);
-
-    bool should_enter_deep_sleep = is_battery_charge_low || is_ble_advertising_inactive || is_latest_hydration_old;
-    bool has_reached_retry_limit = deep_sleep_attempt_count >= max_deep_sleep_enter_retry_count;
-
-    ESP_LOGI(TAG, "Deep sleep enter attempt count: %d", deep_sleep_attempt_count);
-
-    if (should_enter_deep_sleep || has_reached_retry_limit)
+    if (ESP_OK != wakeupSourceStatus)
     {
-        bool all_tasks_are_ready_for_sleep = false;
-        esp_err_t sleep_check_status = is_ready_for_deep_sleep(&all_tasks_are_ready_for_sleep);
+        ESP_LOGW(TAG, "Error al configurar fuentes de activacion de deep sleep (%s)", esp_err_to_name(wakeupSourceStatus));
+    }
+
+    if (CONFIG_LIGHT_SLEEP_ENABLED)
+    {
+        esp_err_t lightSleepStatus = setup_light_sleep(true);
+
+        if (ESP_OK != lightSleepStatus)
+        {
+            ESP_LOGW(TAG, "Error en setup de light sleep (%s)", esp_err_to_name(lightSleepStatus));
+        }
+    }
+
+    power_mgmt_timer_handle = xTimerCreate(
+        "power_management_timer",
+        power_management_period_ticks,
+        pdTRUE,
+        NULL,
+        power_management_callback
+    );
+
+    if (NULL != power_mgmt_timer_handle)
+    {
+        xTimerStart(power_mgmt_timer_handle, pdMS_TO_TICKS(100));
+
+    } else {
+        ESP_LOGW(TAG, "Error al crear timer para manejo de energia. Revisa que exista suficiente memoria en heap.");
+    }
+}
+
+static void power_management_callback(TimerHandle_t xTimer) 
+{
+    if (NULL == xDeepSleepConditionEvents)
+    {
+        ESP_LOGW(TAG, "El event group para manejo de energia es NULL");
+        return;
+    }
+
+    ESP_LOGI(TAG, "Power manager is running");
+ 
+    BaseType_t shouldEnterSleep = are_deep_sleep_conditions_met();  
+
+    ESP_LOGI(TAG, "Should enter deep sleep? %s", (shouldEnterSleep) ? "yes" : "no");
+
+    if (CONFIG_DEEP_SLEEP_ENABLED && shouldEnterSleep)
+    {
+        const int32_t sleepEnterAttemptCount = increment_sleep_attempt_count();
+        BaseType_t hasReachedRetryLimit = sleepEnterAttemptCount >= CONFIG_MAX_DEEP_SLEEP_ATTEMPTS;
+
+        BaseType_t areTasksReadyForDeepSleep = pdFALSE;
+        esp_err_t sleep_check_status = is_ready_for_deep_sleep(&areTasksReadyForDeepSleep);
 
         if (ESP_OK == sleep_check_status)
         {
-            if (all_tasks_are_ready_for_sleep || has_reached_retry_limit) 
+            ESP_LOGI(TAG, "Tasks ready for sleep? %s, Retry limit reached? %s",
+                     (areTasksReadyForDeepSleep ? "yes" : "no"), (hasReachedRetryLimit ? "yes" : "no"));
+
+            if (areTasksReadyForDeepSleep || hasReachedRetryLimit) 
             {
                 enter_deep_sleep();
             } else 
             {
-                BaseType_t change_period_result = xTimerChangePeriod(
+                BaseType_t changePeriodResult = xTimerChangePeriod(
                     power_mgmt_timer_handle, 
                     device_shutdown_timeout_ticks, 
                     (TickType_t) 0
                 );
 
-                if (pdPASS == change_period_result)
+                if (pdPASS == changePeriodResult)
                 {
-                    increment_sleep_attempt_count();
+                    ESP_LOGI(TAG, "Deep sleep enter attempt count: %d", sleepEnterAttemptCount);
 
                     // Notificar a tasks que el chip va a iniciar deep sleep.
-                    xTaskNotifyGive(xStorageTask);
-                    xTaskNotifyGive(xCommunicationTask);
-                    xTaskNotifyGive(xHydrationInferenceTask);
-                    xTaskNotifyGive(xWeightMeasurementTask);
+                    if (NULL != xStorageTask) xTaskNotify(xStorageTask, DEEP_SLEEP_BEGIN_BIT, eSetBits);
+                    if (NULL != xCommunicationTask) xTaskNotify(xCommunicationTask, DEEP_SLEEP_BEGIN_BIT, eSetBits);
+                    if (NULL != xHydrationInferenceTask) xTaskNotify(xHydrationInferenceTask, DEEP_SLEEP_BEGIN_BIT, eSetBits);
                 } else 
                 {
                     ESP_LOGW(TAG, "Error al configurar timer de manejo de potencia en modo 'timeout'.");
@@ -772,71 +943,64 @@ static void power_management_timer_callback(TimerHandle_t xTimer)
     }
 }
 
-static void init_power_management(void) 
-{
-    after_wakeup();
-
-    // set_max_deep_sleep_duration(((int64_t) CONFIG_MAX_DEEP_SLEEP_DURATION_MS) * 1000);
-    set_max_deep_sleep_duration(((int64_t) 10000) * 1000);
-
-    power_mgmt_timer_handle = xTimerCreate(
-        "power_management_timer",
-        power_management_period_ticks,
-        pdTRUE,
-        NULL,
-        power_management_timer_callback
-    );
-
-    if (NULL != power_mgmt_timer_handle)
-    {
-        xTimerStart(power_mgmt_timer_handle, pdMS_TO_TICKS(100));
-
-    } else {
-        ESP_LOGW(TAG, "Error al crear timer para manejo de energia. Revisa que exista suficiente memoria en heap.");
-    }
-}
-
-static void init_battery_monitoring(void)
-{
-    static const TickType_t batteryMeasurePeriodTicks = pdMS_TO_TICKS(10 * 1000);
-
-    battery_monitor_status = battery_monitor_init();
-
-    ESP_LOGI(TAG, "Battery monitor status (%s)", esp_err_to_name(battery_monitor_status));
-
-    TimerHandle_t xBatteryMonitorTimer = xTimerCreate(
-        "battery_level_timer",
-        batteryMeasurePeriodTicks,
-        pdTRUE,
-        NULL,
-        battery_monitor_timer_callback
-    );
-
-    // Comenzar el timer periodico para obtener mediciones del
-    // nivel de bateria.
-    xTimerStart(xBatteryMonitorTimer, (TickType_t) 0);
-}
-
-static esp_err_t app_startup(void) 
+static esp_err_t app_startup(communication_task_param_t* const outCommunicationTaskParams) 
 {
     esp_err_t setup_status = ESP_OK;
 
     if (ESP_OK == setup_status)
     {
         ESP_LOGD(TAG, "Configurando power management");
-        init_power_management();
+        BaseType_t wakeupFromEXT1 = pdFALSE;
+        init_power_management(&wakeupFromEXT1);
+
+        if (NULL != outCommunicationTaskParams)
+        {
+            outCommunicationTaskParams->useLazyBleEnable = !wakeupFromEXT1;
+        }
+    }
+
+    if (ESP_OK == setup_status)
+    {
+        // Inicializar los objetos de FreeRTOS usados para controlar 
+        // los procesos de almacenar y obtener registros de hidratación. 
+        xStorageQueue = xQueueCreate( MAX_RECORD_QUEUE_LEN, sizeof(hydration_record_t) );
+        xSyncQueue = xQueueCreate( MAX_SYNC_QUEUE_LEN, sizeof(hydration_record_t) );
+        xHx711DataQueue = xQueueCreate( MAX_HX711_DATA_QUEUE_LEN, sizeof(hx711_measures_t) );
+        xBatteryLevelQueue = xQueueCreate( BATTERY_LVL_QUEUE_SIZE, sizeof(battery_measurement_t) );
+
+        if (NULL == xStorageQueue || NULL == xSyncQueue || 
+            NULL == xHx711DataQueue|| NULL == xBatteryLevelQueue) 
+        {
+            setup_status = ESP_ERR_NO_MEM;
+        }
+    }
+
+    if (ESP_OK == setup_status)
+    {
+        xDeepSleepConditionEvents = xEventGroupCreate();
+
+        if (NULL == xDeepSleepConditionEvents)
+        {
+            setup_status = ESP_ERR_NO_MEM;
+        }
     }
 
     if (ESP_OK == setup_status)
     {
         ESP_LOGD(TAG, "Configurando monitor de bateria");
         init_battery_monitoring();
+
+        if (ESP_OK == setup_status)
+        {
+            // Agregar el nivel inicial de la bateria, en vez de esperar 
+            // a que el timer ejecute el callback.
+            battery_monitor_callback(NULL);
+        }
     }
 
     if (ESP_OK == setup_status)
     {
         ESP_LOGD(TAG, "Inicializando NVS");
-
         //NOTA: storage_init() está aquí porque si lo dejaba como parte de 
         // una task y otra task la interrumpía, la inicialización produce
         // un LoadProhibited error. No estoy seguro sobre las implicaciones 
@@ -855,22 +1019,17 @@ static esp_err_t app_startup(void)
 
     if (ESP_OK == setup_status)
     {
-        // Inicializar los objetos de FreeRTOS usados para controlar 
-        // los procesos de almacenar y obtener registros de hidratación. 
-        ESP_LOGD(TAG, "Creando objetos de FreeRTOS");
-        xStorageQueue = xQueueCreate( MAX_RECORD_QUEUE_LEN, sizeof(hydration_record_t) );
-        xSyncQueue = xQueueCreate( MAX_SYNC_QUEUE_LEN, sizeof(hydration_record_t) );
-        xMpu6050DataQueue = xQueueCreate( MAX_MPU6050_DATA_QUEUE_LEN, sizeof(mpu6050_measures_t) );
-        xHx711DataQueue = xQueueCreate( MAX_HX711_DATA_QUEUE_LEN, sizeof(hx711_measures_t) );
+        setup_status = gpio_install_isr_service(ESP_INTR_FLAG_LEVEL1);
+    }
 
-        xBatteryLevelQueue = xQueueCreate( BATTERY_LVL_QUEUE_SIZE, sizeof(battery_measurement_t) );
-        xLatestHydrationTimestampQueue = xQueueCreate(LATEST_HYDR_TIMESTAMP_QUEUE_SIZE, sizeof(int64_t));
-        xBleAdvertisingStartTime = xQueueCreate(BLE_ADV_DURATION_QUEUE_SIZE, sizeof(int64_t));
+    if (ESP_OK == setup_status)
+    {
+        setup_status = i2c_setup();
+    }
 
-        if (NULL == xStorageQueue || NULL == xSyncQueue || NULL == xMpu6050DataQueue || NULL == xHx711DataQueue|| NULL == xBatteryLevelQueue) 
-        {
-            setup_status = ESP_ERR_NO_MEM;
-        }
+    if (ESP_OK == setup_status)
+    {
+        setup_status = mpu_setup();
     }
 
     if (ESP_OK == setup_status) 
@@ -881,19 +1040,43 @@ static esp_err_t app_startup(void)
     return setup_status;
 }
 
-static esp_err_t send_record_to_sync(const hydration_record_t* hydrationRecord, bool* sentToStorage)
+static BaseType_t are_deep_sleep_conditions_met(void)
 {
-    if (NULL == hydrationRecord || NULL == sentToStorage) 
+    EventBits_t deepSleepConditions = xEventGroupGetBits(xDeepSleepConditionEvents);
+    EventBits_t inactiveBits = NO_RECENT_HYDRATION_BIT | BLE_INACTIVE_BIT;
+
+    BaseType_t isBatteryLow = ((deepSleepConditions & LOW_BAT_BIT) == LOW_BAT_BIT);
+    
+    if (pdPASS == isBatteryLow)
+    {
+        ESP_LOGW(TAG, "Battery low");
+    }
+
+    if ((deepSleepConditions & inactiveBits) == inactiveBits)
+    {
+        ESP_LOGW(TAG, "BLE and hydration inference inactivity");
+    }
+
+    BaseType_t shouldEnterSleep = isBatteryLow || (deepSleepConditions & inactiveBits) == inactiveBits; 
+
+    return shouldEnterSleep;
+}
+
+static BaseType_t is_notify_for_deep_sleep_start(uint32_t notifyValue)
+{
+    return (BaseType_t) ((notifyValue & DEEP_SLEEP_BEGIN_BIT) == DEEP_SLEEP_BEGIN_BIT);    
+}
+
+static esp_err_t send_record_to_sync(const hydration_record_t* const hydrationRecord)
+{
+    if (NULL == hydrationRecord) 
     {
         return ESP_ERR_INVALID_ARG;
     }
 
-    static const TickType_t genWaitForSpaceTimeoutMs = pdMS_TO_TICKS(50);
+    static int32_t generatedHydrationRecordCount = 0;
 
-    // Si xBleConnectionStatus(CONNECTED_BIT) esta set, enviar el registro
-    // directamente a la queue de sincronziacion BLE. Si no es asi, 
-    // enviar el registro a la queue de almacenamiento.
-    ble_status_t connectionStatus = ble_wait_for_state(PAIRED, true, 0);
+    static const TickType_t waitForSpaceTimeoutTicks = pdMS_TO_TICKS(50);
 
     char strRegistroHidratacion[100] = {};
     hydration_record_to_string(strRegistroHidratacion, hydrationRecord);
@@ -902,37 +1085,37 @@ static esp_err_t send_record_to_sync(const hydration_record_t* hydrationRecord, 
 
     esp_err_t status = ESP_OK;
         
-    if (PAIRED == connectionStatus) {
+    if (ESP_OK == status) {
         // Intentar enviar el registro de hidratación generado a ser  
         // sincronizado o almacenado. Si la queue está full, esperar por
-        // genWaitForSpaceTimeoutMs ms a que se libere espacio. 
+        // waitForSpaceTimeoutTicks a que se libere espacio. 
         BaseType_t queueSendResult = xQueueSendToBack( 
             xSyncQueue, 
             (void*) hydrationRecord,
-            genWaitForSpaceTimeoutMs
+            waitForSpaceTimeoutTicks
         );
 
         if (queueSendResult == errQUEUE_FULL) {
             status = ESP_ERR_NO_MEM;
         }
-    } else {
-        // Intentar enviar el registro de hidratación generado a ser  
-        // sincronizado o almacenado. Si la queue está full, esperar por
-        // genWaitForSpaceTimeoutMs ms a que se libere espacio. 
-        BaseType_t queueSendResult = xQueueSendToBack( 
-            xStorageQueue, 
-            (void*) hydrationRecord,
-            genWaitForSpaceTimeoutMs
-        );
-
-        if (queueSendResult == errQUEUE_FULL) {
-            status = ESP_ERR_NO_MEM;
-        }
-    }
+    } 
 
     if (ESP_OK == status)
     {
-        *sentToStorage = !(PAIRED == connectionStatus);
+        ++generatedHydrationRecordCount;
+
+        ESP_LOGI(
+            TAG, 
+            "Nuevo registro de hidratacion enviado para sincronizacion, total %d", 
+            generatedHydrationRecordCount
+        );
+    } else 
+    {
+        ESP_LOGW(
+            TAG, 
+            "Un nuevo registro %d no pudo ser enviado (errQUEUE_FULL)",
+            generatedHydrationRecordCount
+        );
     }
 
     return status;
@@ -999,50 +1182,71 @@ static esp_err_t sync_records_from_storage(const nvs_handle_t storageHandle)
     return status;
 }
 
-static esp_err_t transfer_storage_queue_to_sync(void)
+static esp_err_t transfer_hydration_records_from_queue(const QueueHandle_t source, const QueueHandle_t target, int32_t max_count, const TickType_t xTicksToWait)
 {
-    int32_t recordsInStorageQueue = uxQueueMessagesWaiting(xStorageQueue);
-
-    if (recordsInStorageQueue == 0) return ESP_OK;
-
     esp_err_t status = ESP_OK;
-    hydration_record_t xReceivedRecord = { 0, 0, 0, 0 };
-    ESP_LOGD(TAG, "Se encontraron %d registros en queue de almacenamiento durante sincronizacion", recordsInStorageQueue);
 
-    // Si por casualidad hay registros que quedaron en la queue
-    // para ser almacenados, enviarlos directamente a la queue de 
-    // sincronización.
-    for (int16_t i = 0; i < recordsInStorageQueue; ++i) {
-        // Recibir un registro debería ser casi instantáneo, porque 
-        // recordsInStorageQueue > 0.
-        BaseType_t recordReceived = xQueueReceive(
-            xStorageQueue, 
-            &( xReceivedRecord ), 
-            (TickType_t) 0 
-        );
+    if (ESP_OK == status && (NULL == source || NULL == target))
+    {
+        status = ESP_ERR_INVALID_ARG;
+    }
 
-        if (recordReceived) {
-            // Si el registro fue recuperado correctamente, enviarlo a xSyncQueue 
-            // para que sea sincronizado.
-            BaseType_t sendResult = xQueueSendToBack(
-                xSyncQueue, 
-                (void*) &( xReceivedRecord ), 
-                (TickType_t) 0
+    int32_t sourceQueueItemCount = 0;
+    
+    if (ESP_OK == status)
+    {
+        sourceQueueItemCount = uxQueueMessagesWaiting(source);
+        ESP_LOGI(TAG, "La queue source contiene %d elementos, para transferir a target queue", sourceQueueItemCount);
+
+        if (sourceQueueItemCount == 0)
+        {
+            return status;
+        } else if (sourceQueueItemCount > max_count)
+        {
+            // Asegurar que transfiere hasta max_count elementos entre 
+            // las queues.
+            sourceQueueItemCount = max_count;
+        }
+    }
+
+    if (ESP_OK == status)
+    {
+        hydration_record_t xReceivedRecord = { 0, 0, 0, 0 };
+
+        for (int16_t i = 0; i < sourceQueueItemCount; ++i) 
+        {
+            // Recibir un elemento de source queue debería ser casi 
+            // instantáneo, ya que sourceQueueItemCount > 0.
+            BaseType_t recordReceived = xQueueReceive(
+                source, 
+                &(xReceivedRecord), 
+                (TickType_t) 0 
             );
 
-            if (sendResult) {
-                ESP_LOGI(TAG, "Registro que iba a ser almacenado enviado directamente a sincronizacion");
+            if (recordReceived) {
+                // Si el registro fue recuperado correctamente, enviarlo a xSyncQueue 
+                // para que sea sincronizado.
+                BaseType_t sendResult = xQueueSendToBack(
+                    target, 
+                    ((void*) &(xReceivedRecord)), 
+                    xTicksToWait
+                );
+
+                if (pdPASS == sendResult) 
+                {
+                    ESP_LOGI(TAG, "Elemento transferido entre dos queues");
+                } else {
+                    status = ESP_FAIL;
+                    ESP_LOGE(TAG, "El elemento no pudo ser transferido entre dos queues (espERR_QUEUE_FULL)");
+                }
             } else {
                 status = ESP_FAIL;
-                ESP_LOGE(TAG, "El registro no pudo ser enviado para sincronizacion");
+                ESP_LOGE(
+                    TAG, 
+                    "Esperaba encontrar %d elemento en la queue fuente, pero no fue posible obtenerlos", 
+                    sourceQueueItemCount
+                );
             }
-        } else {
-            status = ESP_FAIL;
-            ESP_LOGE(
-                TAG, 
-                "Esperaba encontrar %d registros en xStorageQueue, pero no fue posible obtenerlos", 
-                recordsInStorageQueue
-            );
         }
     }
 
@@ -1104,4 +1308,82 @@ static esp_err_t store_pending_records(const nvs_handle_t storageHandle)
     }
 
     return status;
+}
+
+static void get_comm_task_params(communication_task_param_t* const out_params, void* const pvParameters)
+{
+    if (NULL != out_params)
+    {
+        if (NULL != pvParameters)
+        {
+            out_params->useLazyBleEnable = ((communication_task_param_t*) pvParameters)->useLazyBleEnable;
+        } else 
+        {
+            out_params->useLazyBleEnable = pdFALSE;
+        }
+    }
+}
+
+static esp_err_t sync_next_record_with_ble()
+{
+    static const uint32_t recordReadTimeoutMS = 10 * 1000; 
+
+    esp_err_t status = ESP_FAIL;
+    hydration_record_t xRecordToSync = { 0, 0, 0, 0 };
+    // Obtener el siguiente registro por sincronizar, sin removerlo 
+    // de la queue (un registro es removido hasta que haya sincronizado
+    // con éxito).
+    // Esta operación debería ser prácticamente instantánea, porque 
+    // hasRecordsToSync es pdTRUE y esta es la única task que puede 
+    // recibir elementos de xSyncQueue.
+    BaseType_t wasRecordReceived = xQueuePeek(
+        xSyncQueue, 
+        &xRecordToSync, 
+        (TickType_t) 0
+    );
+
+    if (wasRecordReceived) 
+    {
+        status = ble_synchronize_hydration_record(&xRecordToSync, recordReadTimeoutMS);
+
+        if (ESP_OK == status) 
+        {
+            BaseType_t wasRecordRemoved = xQueueReceive(
+                xSyncQueue,
+                &xRecordToSync, 
+                (TickType_t) 0
+            );
+
+            if (wasRecordRemoved == pdFALSE) 
+            {
+                status = ESP_FAIL;
+            }
+
+        } 
+    }
+
+    return status;
+}
+
+static void log_sensor_measurements(const sensor_measures_t* const measurements)
+{
+    if (NULL != measurements)
+    {
+        ESP_LOGI(TAG, "Timestamp de datos de sensores: %lld", measurements->timestamp_ms);
+
+        ESP_LOGI(
+            TAG, 
+            "Lecturas de HX711: { raw_weight: %d, volume_ml: %u, timestamp: %lld }", 
+            measurements->weight_measurements.raw_weight, measurements->weight_measurements.volume_ml,
+            measurements->weight_measurements.timestamp_ms
+        );
+
+        ESP_LOGI(
+            TAG, 
+            "Lecturas de MPU6050: { accel: (%.2f, %.2f, %.2f), gyro: (%.2f, %.2f, %.2f), temp: %.2f }", 
+            measurements->accel_gyro_measurements.acceleration.x, measurements->accel_gyro_measurements.acceleration.y, measurements->accel_gyro_measurements.acceleration.z, 
+            measurements->accel_gyro_measurements.gyroscope.x, measurements->accel_gyro_measurements.gyroscope.y, measurements->accel_gyro_measurements.gyroscope.z, 
+            measurements->accel_gyro_measurements.temperature
+        );
+    }
 }

@@ -109,6 +109,40 @@ esp_err_t ble_driver_sleep()
     return status;
 }
 
+esp_err_t ble_disconnect(void)
+{
+    esp_err_t status = ESP_OK;
+
+    if (ESP_OK == status)
+    {
+        status = ble_gatt_server_disconnect();
+    }
+
+    return status;
+}
+
+esp_err_t ble_stop_advertising(void)
+{
+    esp_err_t status = ESP_OK;
+
+    if (ESP_OK == status)
+    {
+        status = ble_gap_shutdown();
+    } else 
+    {
+        ESP_LOGE(TAG, "BLE GAP stop advertising error (%s)", esp_err_to_name(status));
+    }
+
+    if (ESP_OK == status && NULL != xBleStateEvents)
+    {
+        // Notificar que el advertising ha sido detenido.
+        xEventGroupClearBits(xBleStateEvents, ALL_BITS);
+        xEventGroupSetBits(xBleStateEvents, INITIALIZED_BIT);
+    }
+
+    return status;
+}
+
 esp_err_t ble_driver_shutdown(void)
 {
     esp_err_t status = ESP_OK;
@@ -142,19 +176,33 @@ esp_err_t ble_driver_shutdown(void)
         return status;
     }
 
-    status = esp_bluedroid_deinit();
-
-    if (ESP_OK != status) 
-    {
-        ESP_LOGW(TAG, "Error al des-inicializar bluedroid (%s)", esp_err_to_name(status));
-        return status;
-    }
-
     status = esp_bt_controller_disable();
 
     if (ESP_OK != status) 
     {
         ESP_LOGW(TAG, "Error al desactivar el controlador BT (%s)", esp_err_to_name(status));
+        return status;
+    }
+
+    if (NULL != xBleStateEvents)
+    {
+        // Notificar que BLE ha sido desactivado.
+        xEventGroupClearBits(xBleStateEvents, ALL_BITS);
+        xEventGroupSetBits(xBleStateEvents, SHUT_DOWN_BIT);
+    }
+
+    return status;
+}
+
+esp_err_t ble_driver_deinit(void)
+{
+    esp_err_t status = ESP_OK;
+
+    status = esp_bluedroid_deinit();
+
+    if (ESP_OK != status) 
+    {
+        ESP_LOGW(TAG, "Error al des-inicializar bluedroid (%s)", esp_err_to_name(status));
         return status;
     }
 
@@ -174,10 +222,13 @@ esp_err_t ble_driver_shutdown(void)
         return status;
     }
 
-    xEventGroupClearBits(xBleStateEvents, ALL_BITS);
-    xEventGroupSetBits(xBleStateEvents, INACTIVE_BIT);
+    if (NULL != xBleStateEvents)
+    {
+        xEventGroupClearBits(xBleStateEvents, ALL_BITS);
+        xEventGroupSetBits(xBleStateEvents, INACTIVE_BIT);
+    }
 
-    return ESP_OK;
+    return status;
 }
 
 esp_err_t ble_sync_battery_charge(uint8_t remaining_battery_charge)
@@ -196,6 +247,16 @@ esp_err_t ble_synchronize_hydration_record(const hydration_record_t* record, con
 {
     esp_err_t status = ESP_OK;
 
+    if (NULL == xBleStateEvents)
+    {
+        status = ESP_FAIL;
+    }
+
+    if (NULL == record) 
+    {
+        status = ESP_ERR_INVALID_ARG;
+    }
+
     if (ESP_OK == status) 
     {
         status = hydration_svc_set_value(record);
@@ -206,23 +267,26 @@ esp_err_t ble_synchronize_hydration_record(const hydration_record_t* record, con
         status = battery_svc_set_value(record->battery_level);
     }
 
-    ESP_LOGI(
-        TAG, 
-        "Registro convertido a buffers para ser sincronizado (water_amount, temperature, battery_level, timestamp):"
-    );
+    if (ESP_OK == status)
+    {
+        ESP_LOGI(
+            TAG, 
+            "Registro convertido a buffers para ser sincronizado (water_amount, temperature, battery_level, timestamp):"
+        );
 
-    xEventGroupClearBits(xBleStateEvents, RECORD_SYNCHRONIZED_BIT);
+        xEventGroupClearBits(xBleStateEvents, RECORD_SYNCHRONIZED_BIT);
 
-    is_record_available = 0x01;
+        is_record_available = 0x01;
 
-    esp_err_t notify_status = ble_gatt_server_indicate(
-        hydration_handle_table[HYDR_IDX_HAS_NEW_RECORDS_VAL],
-        sizeof(is_record_available),
-        &is_record_available,
-        false
-    );
+        status = ble_gatt_server_indicate(
+            hydration_handle_table[HYDR_IDX_HAS_NEW_RECORDS_VAL],
+            sizeof(is_record_available),
+            &is_record_available,
+            false
+        );
+    }
 
-    if (ESP_OK == notify_status) 
+    if (ESP_OK == status) 
     {
         // Esperar a recibir un WRITE_EVT en is_record_available, o a timeout.
         EventBits_t bleStatusBits = xEventGroupWaitBits(
@@ -236,18 +300,23 @@ esp_err_t ble_synchronize_hydration_record(const hydration_record_t* record, con
         if (bleStatusBits & RECORD_SYNCHRONIZED_BIT) 
         {
             xEventGroupClearBits(xBleStateEvents, RECORD_SYNCHRONIZED_BIT);
-            return ESP_OK;
         } else 
         {
-            return ESP_ERR_TIMEOUT;
+            status = ESP_ERR_TIMEOUT;
         }
     }
 
-    return ESP_FAIL;
+
+    return status;
 }
 
 ble_status_t ble_wait_for_state(const ble_status_t status, const bool match_exact_state, const uint32_t ms_to_wait) 
 {
+    if (NULL == xBleStateEvents)
+    {
+        return INACTIVE_BIT;
+    }
+
     // Determinar los bits que deben ser esperados.
     EventBits_t bitsToWaitFor = ble_status_to_event_bits(status);
 
@@ -282,6 +351,9 @@ static EventBits_t ble_status_to_event_bits(const ble_status_t status)
         case INITIALIZING:
             bits |= INITIALIZING_BIT;
             break;
+        case INITIALIZED:
+            bits |= INITIALIZED_BIT;
+            break;
         case ADVERTISING:
             bits |= ADVERTISING_BIT;
             break;
@@ -293,6 +365,9 @@ static EventBits_t ble_status_to_event_bits(const ble_status_t status)
             break;
         case SHUTTING_DOWN:    
             bits |= SHUTTING_DOWN_BIT;
+            break;
+        case SHUT_DOWN:
+            bits |= SHUT_DOWN_BIT;
             break;
         case UNKNOWN:
             bits = 0;
@@ -307,10 +382,12 @@ static const char* ble_status_to_string(const ble_status_t status)
     switch (status) {
         case INACTIVE: return "Inactive";
         case INITIALIZING: return "Initializing";
+        case INITIALIZED: return "Initialized";
         case ADVERTISING: return "Advertising";
         case PAIRING: return "Pairing";
         case PAIRED: return "Paired";
         case SHUTTING_DOWN: return "Shutting down";
+        case SHUT_DOWN: return "Shut down";
         case UNKNOWN: return "Unknown";
     }
 

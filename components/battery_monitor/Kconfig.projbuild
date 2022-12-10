@@ -23,4 +23,16 @@ menu "Battery monitor"
         default 35
         help 
             The ADC GPIO used to measure the current battery voltage
+
+    config BATTERY_LOW_CHARGE_PCNT_THRESHOLD
+        int "Threshold for low battery charge"
+        default 5
+        help
+            The battery percentage threshold that is considered as 'low battery'
+
+    config BATTERY_MEASURE_INTERVAL_MS
+        int "Interval between battery measurements (ms)"
+        default 10000
+        help
+            The amount of time to wait before making the next battery charge measurement, in milliseconds.
 endmenu

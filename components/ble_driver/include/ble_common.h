@@ -13,10 +13,12 @@ typedef enum {
     UNKNOWN,
     INACTIVE,
     INITIALIZING,
+    INITIALIZED,
     ADVERTISING,
     PAIRING,
     PAIRED,
     SHUTTING_DOWN,
+    SHUT_DOWN
 } ble_status_t;
 
 extern const uint16_t primary_service_uuid;
@@ -35,11 +37,13 @@ extern const uint8_t char_property_read_write_notify;
 
 extern const EventBits_t INACTIVE_BIT;
 extern const EventBits_t INITIALIZING_BIT;
+extern const EventBits_t INITIALIZED_BIT;
 extern const EventBits_t ADVERTISING_BIT;
 extern const EventBits_t PAIRING_BIT;
 extern const EventBits_t PAIRED_BIT;
 extern const EventBits_t RECORD_SYNCHRONIZED_BIT;
 extern const EventBits_t SHUTTING_DOWN_BIT;
+extern const EventBits_t SHUT_DOWN_BIT;
 
 extern const EventBits_t ALL_BITS;
 
