@@ -38,13 +38,11 @@ menu "Power management configuration"
 
     config WAKEUP_ON_MOTION
         bool "Wakeup when MPU detects motion"
-        default true
         help
             If true, the device will wakeup from sleep whenever the MPU detects considerable acceleration and rotation.
 
     config WAKEUP_ON_WEIGHT
         bool "Wakeup when weight is lifted"
-        default true
 
     config MAX_DEEP_SLEEP_DURATION_MS
         int "Max deep sleep duration in milliseconds"

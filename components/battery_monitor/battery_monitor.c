@@ -180,5 +180,5 @@ BaseType_t is_battery_low(const battery_measurement_t* const bat_measurement)
         return pdFALSE;
     }
 
-    return (bat_measurement->remaining_charge <= CONFIG_BATTERY_LOW_CHARGE_PCNT_THRESHOLD);
+    return (bat_measurement->remaining_charge <= (uint8_t) CONFIG_BATTERY_LOW_CHARGE_PCNT_THRESHOLD);
 }

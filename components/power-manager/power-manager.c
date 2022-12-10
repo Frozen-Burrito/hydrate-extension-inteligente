@@ -59,23 +59,18 @@ esp_err_t after_wakeup(BaseType_t* const wakeupFromEXT)
 
     const char* cause_name = wakeup_cause_to_name(wakeup_cause);
 
+    if (ESP_SLEEP_WAKEUP_UNDEFINED != wakeup_cause)
+    {
+        ESP_LOGI(TAG, "Causa de wakeup: %s, tiempo en deep sleep: %dms", cause_name, latest_sleep_duration_ms);
+    }
+
     switch (wakeup_cause)
     {
+        // Fall-through intencional, solo confirma que wakeup sea por una causa esperada.
     case ESP_SLEEP_WAKEUP_ULP:
-        //TODO: manejar wakeups por ULP
-        ESP_LOGI(TAG, "Sistema despertado de deep sleep por ULP, tiempo en deep sleep: %dms", latest_sleep_duration_ms);
-        wakeup_status = ESP_OK;
-        break;
     case ESP_SLEEP_WAKEUP_EXT0:
-        wakeup_status = ESP_OK;
-        break;
     case ESP_SLEEP_WAKEUP_EXT1:
-        //TODO: manejo especifico de wakeups por EXT1
-        ESP_LOGI(TAG, "Sistema despertado de deep sleep por EXT1, tiempo en deep sleep: %dms", latest_sleep_duration_ms);
-        wakeup_status = ESP_OK;
-        break;
     case ESP_SLEEP_WAKEUP_TIMER:
-        ESP_LOGI(TAG, "Sistema despertado de deep sleep por timer, tiempo en deep sleep: %dms", latest_sleep_duration_ms);
         wakeup_status = ESP_OK;
         break;
     case ESP_SLEEP_WAKEUP_UNDEFINED:
@@ -156,16 +151,40 @@ esp_err_t setup_light_sleep(bool enable_auto_light_sleep)
 
     if (ESP_OK == light_sleep_setup_status)
     {
+
         esp_pm_config_esp32_t pm_config = {
             .max_freq_mhz = CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ,
             .min_freq_mhz = CONFIG_MIN_CPU_FREQ_MHZ,
-            .light_sleep_enable = enable_auto_light_sleep
+#ifdef CONFIG_FREERTOS_USE_TICKLESS_IDLE
+#ifdef CONFIG_LIGHT_SLEEP_ENABLED
+            // .light_sleep_enable = enable_auto_light_sleep
+            .light_sleep_enable = false
+#endif
+#endif
         };
 
         light_sleep_setup_status = esp_pm_configure(&pm_config);
     }
 
     return light_sleep_setup_status;
+}
+
+esp_err_t enter_light_sleep(uint64_t duration_us)
+{
+    esp_err_t status = ESP_OK;
+
+    if (ESP_OK == status)
+    {
+        status = esp_sleep_enable_timer_wakeup(duration_us);
+    }
+
+    if (ESP_OK == status)
+    {
+        ESP_LOGI(TAG, "Iniciando light sleep, duracion = %lldus", duration_us);
+        status = esp_light_sleep_start();
+    }
+
+    return status;
 }
 
 esp_err_t setup_wakeup_sources(const gpio_num_t motionIntPin)
@@ -178,35 +197,26 @@ esp_err_t setup_wakeup_sources(const gpio_num_t motionIntPin)
     if (ESP_OK == setup_status)
     {
         // Activar wakeup desde EXT1.
-        const gpio_num_t ext_wakeup_pin = CONFIG_POWER_ON_GPIO_NUM;
-        const uint64_t ext1_wakeup_power_on_mask = (1ULL << ext_wakeup_pin);
-
-        ESP_LOGI(TAG, "Activando wakeup desde EXT1 con mask de GPIOs %llu", ext1_wakeup_power_on_mask);
-
-        gpio_pullup_dis(ext_wakeup_pin);
-        gpio_pulldown_en(ext_wakeup_pin);
-
-        setup_status = esp_sleep_enable_ext1_wakeup(ext1_wakeup_power_on_mask, ESP_EXT1_WAKEUP_ANY_HIGH);
-    }
-
-    if (CONFIG_WAKEUP_ON_MOTION && ESP_OK == setup_status)
-    {
-        if (esp_sleep_is_valid_wakeup_gpio(motionIntPin))
+        uint64_t motionWakeupPinMask = 0ULL;
+#ifndef CONFIG_MPU_INT_ACTIVE_LOW
+        if (CONFIG_WAKEUP_ON_MOTION)
         {
-            // Activar wakeup desde EXT0
-            setup_status = rtc_gpio_pulldown_dis(motionIntPin);
-            setup_status = rtc_gpio_pullup_en(motionIntPin);
-            
-            if (ESP_OK == setup_status)
+            if (esp_sleep_is_valid_wakeup_gpio(motionIntPin))
             {
-                const uint64_t ext1MotionWakeupMask = (1ULL << motionIntPin);
-                ESP_LOGI(TAG, "Activando wakeup desde EXT0 con interrupt de GPIO%d", motionIntPin);
-                setup_status = esp_sleep_enable_ext1_wakeup(ext1MotionWakeupMask, ESP_EXT1_WAKEUP_ALL_LOW);
+                motionWakeupPinMask = (1ULL << motionIntPin);
             }
-        } else 
-        {
-            ESP_LOGW(TAG, "Motion interrupt GPIO%d is not a valid wake up source", motionIntPin);
         }
+#endif
+
+        const uint64_t buttonWakeupPinMask = (1ULL << CONFIG_POWER_ON_GPIO_NUM);
+        const uint64_t ext1HighMask = (buttonWakeupPinMask | motionWakeupPinMask);
+
+        ESP_LOGI(TAG, "Activando wakeup desde EXT1 con mask de GPIOs %llu", ext1HighMask);
+
+        rtc_gpio_pullup_dis(CONFIG_POWER_ON_GPIO_NUM);
+        rtc_gpio_pulldown_en(CONFIG_POWER_ON_GPIO_NUM);
+
+        setup_status = esp_sleep_enable_ext1_wakeup(ext1HighMask, ESP_EXT1_WAKEUP_ANY_HIGH);
     }
 
     if (ESP_OK == setup_status && CONFIG_WAKEUP_ON_WEIGHT)

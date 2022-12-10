@@ -22,6 +22,8 @@
  */
 esp_err_t setup_light_sleep(bool enable_auto_light_sleep);
 
+esp_err_t enter_light_sleep(uint64_t durationUs);
+
 /**
  * @brief Configura las fuentes que pueden despertar al sistema cuando está en sueño profundo.
  */
