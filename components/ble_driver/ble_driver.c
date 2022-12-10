@@ -109,6 +109,40 @@ esp_err_t ble_driver_sleep()
     return status;
 }
 
+esp_err_t ble_disconnect(void)
+{
+    esp_err_t status = ESP_OK;
+
+    if (ESP_OK == status)
+    {
+        status = ble_gatt_server_disconnect();
+    }
+
+    return status;
+}
+
+esp_err_t ble_stop_advertising(void)
+{
+    esp_err_t status = ESP_OK;
+
+    if (ESP_OK == status)
+    {
+        status = ble_gap_shutdown();
+    } else 
+    {
+        ESP_LOGE(TAG, "BLE GAP stop advertising error (%s)", esp_err_to_name(status));
+    }
+
+    if (ESP_OK == status && NULL != xBleStateEvents)
+    {
+        // Notificar que el advertising ha sido detenido.
+        xEventGroupClearBits(xBleStateEvents, ALL_BITS);
+        xEventGroupSetBits(xBleStateEvents, INITIALIZED_BIT);
+    }
+
+    return status;
+}
+
 esp_err_t ble_driver_shutdown(void)
 {
     esp_err_t status = ESP_OK;
@@ -142,19 +176,33 @@ esp_err_t ble_driver_shutdown(void)
         return status;
     }
 
-    status = esp_bluedroid_deinit();
-
-    if (ESP_OK != status) 
-    {
-        ESP_LOGW(TAG, "Error al des-inicializar bluedroid (%s)", esp_err_to_name(status));
-        return status;
-    }
-
     status = esp_bt_controller_disable();
 
     if (ESP_OK != status) 
     {
         ESP_LOGW(TAG, "Error al desactivar el controlador BT (%s)", esp_err_to_name(status));
+        return status;
+    }
+
+    if (NULL != xBleStateEvents)
+    {
+        // Notificar que BLE ha sido desactivado.
+        xEventGroupClearBits(xBleStateEvents, ALL_BITS);
+        xEventGroupSetBits(xBleStateEvents, SHUT_DOWN_BIT);
+    }
+
+    return status;
+}
+
+esp_err_t ble_driver_deinit(void)
+{
+    esp_err_t status = ESP_OK;
+
+    status = esp_bluedroid_deinit();
+
+    if (ESP_OK != status) 
+    {
+        ESP_LOGW(TAG, "Error al des-inicializar bluedroid (%s)", esp_err_to_name(status));
         return status;
     }
 
@@ -174,10 +222,13 @@ esp_err_t ble_driver_shutdown(void)
         return status;
     }
 
-    xEventGroupClearBits(xBleStateEvents, ALL_BITS);
-    xEventGroupSetBits(xBleStateEvents, INACTIVE_BIT);
+    if (NULL != xBleStateEvents)
+    {
+        xEventGroupClearBits(xBleStateEvents, ALL_BITS);
+        xEventGroupSetBits(xBleStateEvents, INACTIVE_BIT);
+    }
 
-    return ESP_OK;
+    return status;
 }
 
 esp_err_t ble_sync_battery_charge(uint8_t remaining_battery_charge)
@@ -300,6 +351,9 @@ static EventBits_t ble_status_to_event_bits(const ble_status_t status)
         case INITIALIZING:
             bits |= INITIALIZING_BIT;
             break;
+        case INITIALIZED:
+            bits |= INITIALIZED_BIT;
+            break;
         case ADVERTISING:
             bits |= ADVERTISING_BIT;
             break;
@@ -311,6 +365,9 @@ static EventBits_t ble_status_to_event_bits(const ble_status_t status)
             break;
         case SHUTTING_DOWN:    
             bits |= SHUTTING_DOWN_BIT;
+            break;
+        case SHUT_DOWN:
+            bits |= SHUT_DOWN_BIT;
             break;
         case UNKNOWN:
             bits = 0;
@@ -325,10 +382,12 @@ static const char* ble_status_to_string(const ble_status_t status)
     switch (status) {
         case INACTIVE: return "Inactive";
         case INITIALIZING: return "Initializing";
+        case INITIALIZED: return "Initialized";
         case ADVERTISING: return "Advertising";
         case PAIRING: return "Pairing";
         case PAIRED: return "Paired";
         case SHUTTING_DOWN: return "Shutting down";
+        case SHUT_DOWN: return "Shut down";
         case UNKNOWN: return "Unknown";
     }
 

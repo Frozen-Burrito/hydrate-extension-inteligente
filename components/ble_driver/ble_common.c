@@ -16,15 +16,18 @@ const uint8_t char_property_read_write_notify = ESP_GATT_CHAR_PROP_BIT_WRITE | E
 
 const EventBits_t INACTIVE_BIT = ( 1 << 0 );
 const EventBits_t INITIALIZING_BIT = ( 1 << 1 );
-const EventBits_t ADVERTISING_BIT = ( 1 << 2 );
-const EventBits_t PAIRING_BIT = ( 1 << 3 );
-const EventBits_t PAIRED_BIT = ( 1 << 4 );
-const EventBits_t RECORD_SYNCHRONIZED_BIT = ( 1 << 5 );
-const EventBits_t SHUTTING_DOWN_BIT = ( 1 << 6 );
+const EventBits_t INITIALIZED_BIT = ( 1 << 2 );
+const EventBits_t ADVERTISING_BIT = ( 1 << 3 );
+const EventBits_t PAIRING_BIT = ( 1 << 4 );
+const EventBits_t PAIRED_BIT = ( 1 << 5 );
+const EventBits_t RECORD_SYNCHRONIZED_BIT = ( 1 << 6 );
+const EventBits_t SHUTTING_DOWN_BIT = ( 1 << 7 );
+const EventBits_t SHUT_DOWN_BIT = ( 1 << 8 );
 
 const EventBits_t ALL_BITS = (
-    INACTIVE | INITIALIZING_BIT | ADVERTISING_BIT | PAIRING_BIT | PAIRED_BIT | 
-    RECORD_SYNCHRONIZED_BIT | SHUTTING_DOWN_BIT
+    INACTIVE | INITIALIZING_BIT | INITIALIZED_BIT | ADVERTISING_BIT | 
+    PAIRING_BIT | PAIRED_BIT | RECORD_SYNCHRONIZED_BIT | 
+    SHUTTING_DOWN_BIT | SHUT_DOWN_BIT
 );
 
 const uint16_t INDICATE_NOTIFY_DISABLED = 0x0000;

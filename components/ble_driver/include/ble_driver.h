@@ -28,6 +28,10 @@ esp_err_t ble_driver_enable(void);
 
 esp_err_t ble_driver_sleep(void);
 
+esp_err_t ble_disconnect(void);
+
+esp_err_t ble_stop_advertising(void);
+
 esp_err_t ble_driver_shutdown(void);
 
 esp_err_t ble_driver_deinit(void);
