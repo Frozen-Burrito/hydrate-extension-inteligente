@@ -7,14 +7,11 @@ static EventGroupHandle_t xBleStateEvents = NULL;
 static uint8_t is_record_available = 0;
 
 static EventBits_t ble_status_to_event_bits(const ble_status_t status);
-
 static ble_status_t event_bits_to_status(const EventBits_t bits);
 
 static const char* ble_status_to_string(const ble_status_t status);
 
-// static void substr(char* dest, char* sub, size_t start, size_t len);
-
-esp_err_t ble_driver_init(const char* device_name)
+esp_err_t ble_driver_init(void)
 {
     esp_err_t status = ESP_OK;
 
@@ -49,6 +46,24 @@ esp_err_t ble_driver_init(const char* device_name)
         }
     }
 
+    if (ESP_OK == status && NULL != xBleStateEvents) 
+    {
+        xEventGroupClearBits(xBleStateEvents, ALL_BITS);
+        xEventGroupSetBits(xBleStateEvents, INITIALIZED_BIT);
+    }
+
+    if (ESP_OK == status) 
+    {
+        ESP_LOGD(TAG, "Driver BLE inicializado");
+    }
+
+    return status;
+}
+
+esp_err_t ble_driver_enable(const char* device_name)
+{
+    esp_err_t status = ESP_OK;
+
     if (ESP_OK == status) 
     {
         status = esp_bt_controller_enable(ESP_BT_MODE_BLE);
@@ -81,29 +96,30 @@ esp_err_t ble_driver_init(const char* device_name)
 
     if (ESP_OK == status) 
     {
-        status = ble_gap_init(xBleStateEvents);
-    }
-
-    if (ESP_OK == status) 
-    {
         status = ble_gatt_server_init(device_name, xBleStateEvents);
     }
 
-    if (ESP_OK == status) 
+    if (ESP_OK == status && NULL != xBleStateEvents)
     {
-        ESP_LOGD(TAG, "Driver BLE inicializado");
+        xEventGroupClearBits(xBleStateEvents, ALL_BITS);
+        xEventGroupSetBits(xBleStateEvents, ENABLED_BIT);
     }
 
     return status;
 }
 
-esp_err_t ble_driver_sleep()
+esp_err_t ble_driver_start_advertising(void)
 {
     esp_err_t status = ESP_OK;
 
     if (ESP_OK == status) 
     {
-        status = esp_bt_sleep_enable();
+        status = ble_gap_init(xBleStateEvents);
+
+        if (ESP_OK != status)
+        {
+            ESP_LOGE(TAG, "Error al activar BLE GAP");
+        }
     }
 
     return status;
@@ -137,7 +153,7 @@ esp_err_t ble_stop_advertising(void)
     {
         // Notificar que el advertising ha sido detenido.
         xEventGroupClearBits(xBleStateEvents, ALL_BITS);
-        xEventGroupSetBits(xBleStateEvents, INITIALIZED_BIT);
+        xEventGroupSetBits(xBleStateEvents, ENABLED_BIT);
     }
 
     return status;
@@ -161,18 +177,19 @@ esp_err_t ble_driver_shutdown(void)
         return status;
     }
 
-    status = ble_gap_shutdown();
-
-    if (ESP_OK != status) 
-    {
-        return status;
-    }
-
     status = esp_bluedroid_disable();
 
     if (ESP_OK != status) 
     {
         ESP_LOGW(TAG, "Error al desactivar bluedroid (%s)", esp_err_to_name(status));
+        return status;
+    }
+
+    status = esp_bluedroid_deinit();
+
+    if (ESP_OK != status) 
+    {
+        ESP_LOGW(TAG, "Error al des-inicializar bluedroid (%s)", esp_err_to_name(status));
         return status;
     }
 
@@ -188,7 +205,7 @@ esp_err_t ble_driver_shutdown(void)
     {
         // Notificar que BLE ha sido desactivado.
         xEventGroupClearBits(xBleStateEvents, ALL_BITS);
-        xEventGroupSetBits(xBleStateEvents, SHUT_DOWN_BIT);
+        xEventGroupSetBits(xBleStateEvents, INITIALIZED_BIT);
     }
 
     return status;
@@ -197,14 +214,6 @@ esp_err_t ble_driver_shutdown(void)
 esp_err_t ble_driver_deinit(void)
 {
     esp_err_t status = ESP_OK;
-
-    status = esp_bluedroid_deinit();
-
-    if (ESP_OK != status) 
-    {
-        ESP_LOGW(TAG, "Error al des-inicializar bluedroid (%s)", esp_err_to_name(status));
-        return status;
-    }
 
     status = esp_bt_controller_deinit();
 
@@ -226,6 +235,18 @@ esp_err_t ble_driver_deinit(void)
     {
         xEventGroupClearBits(xBleStateEvents, ALL_BITS);
         xEventGroupSetBits(xBleStateEvents, INACTIVE_BIT);
+    }
+
+    return status;
+}
+
+esp_err_t ble_driver_sleep(void)
+{
+    esp_err_t status = ESP_OK;
+
+    if (ESP_OK == status) 
+    {
+        status = esp_bt_sleep_enable();
     }
 
     return status;
@@ -314,7 +335,7 @@ ble_status_t ble_wait_for_state(const ble_status_t status, const bool match_exac
 {
     if (NULL == xBleStateEvents)
     {
-        return INACTIVE_BIT;
+        return INACTIVE;
     }
 
     // Determinar los bits que deben ser esperados.
@@ -354,6 +375,9 @@ static EventBits_t ble_status_to_event_bits(const ble_status_t status)
         case INITIALIZED:
             bits |= INITIALIZED_BIT;
             break;
+        case ENABLED:
+            bits |= ENABLED_BIT;
+            break;
         case ADVERTISING:
             bits |= ADVERTISING_BIT;
             break;
@@ -383,6 +407,7 @@ static const char* ble_status_to_string(const ble_status_t status)
         case INACTIVE: return "Inactive";
         case INITIALIZING: return "Initializing";
         case INITIALIZED: return "Initialized";
+        case ENABLED: return "Enabled";
         case ADVERTISING: return "Advertising";
         case PAIRING: return "Pairing";
         case PAIRED: return "Paired";
@@ -402,6 +427,10 @@ static ble_status_t event_bits_to_status(const EventBits_t bits)
         status = INACTIVE;
     } else if (bits & INITIALIZING_BIT) {
         status = INITIALIZING;
+    } else if (bits & INITIALIZED_BIT) {
+        status = INITIALIZED;
+    } else if (bits & ENABLED_BIT) {
+        status = ENABLED;
     } else if (bits & ADVERTISING_BIT) {
         status = ADVERTISING;
     } else if (bits & PAIRING_BIT) {
@@ -410,13 +439,9 @@ static ble_status_t event_bits_to_status(const EventBits_t bits)
         status = PAIRED;
     } else if (bits & SHUTTING_DOWN_BIT) {
         status = SHUTTING_DOWN;
-    } 
+    } else if (bits & SHUT_DOWN_BIT) {
+        status = SHUT_DOWN;
+    }     
 
     return status;
 }
-
-// static void substr(char* dest, char* sub, size_t start, size_t len) 
-// {
-//     memcpy(dest, &sub[start], len);
-//     dest[len] = '\0';
-// }

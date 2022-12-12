@@ -14,6 +14,7 @@ typedef enum {
     INACTIVE,
     INITIALIZING,
     INITIALIZED,
+    ENABLED,
     ADVERTISING,
     PAIRING,
     PAIRED,
@@ -38,6 +39,7 @@ extern const uint8_t char_property_read_write_notify;
 extern const EventBits_t INACTIVE_BIT;
 extern const EventBits_t INITIALIZING_BIT;
 extern const EventBits_t INITIALIZED_BIT;
+extern const EventBits_t ENABLED_BIT;
 extern const EventBits_t ADVERTISING_BIT;
 extern const EventBits_t PAIRING_BIT;
 extern const EventBits_t PAIRED_BIT;

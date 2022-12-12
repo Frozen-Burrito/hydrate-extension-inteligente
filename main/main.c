@@ -115,6 +115,9 @@ static BaseType_t is_notify_for_deep_sleep_start(uint32_t notifyValue);
 
 static void init_battery_monitoring(void);
 
+static esp_err_t ble_init(void);
+static esp_err_t ble_enable(const char* const device_name);
+
 static esp_err_t app_startup(communication_task_param_t* const outCommunicationTaskParams);
 
 /* Main app entry point */
@@ -245,8 +248,6 @@ static void hydration_inference_task(void* pvParameters)
 {
     static const char* taskTag = "hydr_inf";
 
-    static BaseType_t auxTestRecordCreated = pdFALSE;
-
     static const TickType_t waitForDataTimeoutTicks = pdMS_TO_TICKS(1000);
     static const TickType_t dataReadIntervalTicks = pdMS_TO_TICKS(200);
 
@@ -281,6 +282,11 @@ static void hydration_inference_task(void* pvParameters)
             {
                 esp_err_t disableMpuInterruptsStatus = mpu6050_disable_interrupts(xMpuSensor, MPU_INT_DATA_RDY_BIT);
 
+                if (ESP_OK != disableMpuInterruptsStatus)
+                {
+                    ESP_LOGW(TAG, "Error desactivar interrupts de MPU (%s)", esp_err_to_name(disableMpuInterruptsStatus));
+                }
+
                 esp_err_t motionEnableStatus = mpu6050_enable_motion_detect(xMpuSensor, &mpu_config);
 
                 if (ESP_OK != motionEnableStatus)
@@ -307,7 +313,7 @@ static void hydration_inference_task(void* pvParameters)
             uint8_t interrupt_status = 0x00;
             mpu6050_read_interrupt_status(xMpuSensor, &interrupt_status);
 
-            ESP_LOGI(TAG, "MPU6050 interrupt status %0X", interrupt_status);
+            ESP_LOGD(TAG, "MPU6050 interrupt status %0X", interrupt_status);
 
             if (mpu6050_is_intr_for_data(interrupt_status))
             {
@@ -324,7 +330,7 @@ static void hydration_inference_task(void* pvParameters)
 
             if (mpu6050_is_intr_for_motion(interrupt_status))
             {
-                ESP_LOGI(TAG, "MPU detected motion");
+                ESP_LOGD(TAG, "MPU detected motion");
             }
         }
 
@@ -334,36 +340,27 @@ static void hydration_inference_task(void* pvParameters)
             (TickType_t) 0
         );
 
-        bool sensor_measurements_available = true;
+        bool sensor_measurements_available = mpuHasData == pdTRUE;
 
         if (sensor_measurements_available) 
         {
+            ESP_LOGI(TAG, "Measurements index = %d", indexOfLatestSensorReadings);
             record_measurements_timestamp(&readingsBuffer[indexOfLatestSensorReadings]);
 
-            sensor_measures_t latest_sensor_data = readingsBuffer[indexOfLatestSensorReadings];
+            // sensor_measures_t latest_sensor_data = readingsBuffer[indexOfLatestSensorReadings];
 
-            log_sensor_measurements(&latest_sensor_data);
+            // log_sensor_measurements(&latest_sensor_data);
 
             hydration_record_t hydrationRecord = {};
             
             // Algoritmo para determinar si las mediciones en readingsBuffer
             // son indicativas de consumo de agua.
-            // bool was_hydration_recorded = hydration_record_from_measures(readingsBuffer, MAX_SENSOR_DATA_BUF_LEN, &hydrationRecord);
-            bool was_hydration_recorded = !auxTestRecordCreated;
-            // ESP_LOGI(TAG, "Do measures represent hydration: %s", (was_hydration_recorded ? "yes" : "no" ));
-
-            EventBits_t sleepConditionStatus = xEventGroupWaitBits(
-                xDeepSleepConditionEvents, 
-                NO_RECENT_HYDRATION_BIT,
-                pdFALSE,
-                pdTRUE,
-                (TickType_t) 0
-            );
-            BaseType_t shouldNotifyNoRecentHydration = ((sleepConditionStatus & NO_RECENT_HYDRATION_BIT) != NO_RECENT_HYDRATION_BIT);
+            bool was_hydration_recorded = hydration_record_from_measures(readingsBuffer, MAX_SENSOR_DATA_BUF_LEN, &hydrationRecord);
+            // bool was_hydration_recorded = !auxTestRecordCreated;
 
             if (was_hydration_recorded) 
             {
-                hydrationRecord = create_random_record();
+                ESP_LOGI(TAG, "Do measures represent hydration? yes");
 
                 timestampOfLastHydrationUs = esp_timer_get_time();
                 
@@ -382,16 +379,26 @@ static void hydration_inference_task(void* pvParameters)
                     hydrationRecord.battery_level = battery_measurement.remaining_charge; 
                 }
                 
-                auxTestRecordCreated = pdTRUE;
                 esp_err_t sendRecordStatus = send_record_to_sync(&hydrationRecord);
 
                 if (ESP_OK != sendRecordStatus) 
                 {            
                     ESP_LOGW(TAG, "Error sending hydration record to sync (%s)", esp_err_to_name(sendRecordStatus));
                 }
-            } else if (shouldNotifyNoRecentHydration)
+            } else
             {
-                if (esp_timer_get_time() > (timestampOfLastHydrationUs + maxPeriodWithNoHydrationUs)) 
+                EventBits_t sleepConditionStatus = xEventGroupWaitBits(
+                    xDeepSleepConditionEvents, 
+                    NO_RECENT_HYDRATION_BIT,
+                    pdFALSE,
+                    pdTRUE,
+                    (TickType_t) 0
+                );
+
+                BaseType_t hasHydrationInactivityPeriodExpired = esp_timer_get_time() > (timestampOfLastHydrationUs + maxPeriodWithNoHydrationUs);
+                BaseType_t shouldNotifyNoRecentHydration = ((sleepConditionStatus & NO_RECENT_HYDRATION_BIT) != NO_RECENT_HYDRATION_BIT);
+
+                if (hasHydrationInactivityPeriodExpired && shouldNotifyNoRecentHydration) 
                 {
                     ESP_LOGI(TAG, "%lld + %lld > %lld", timestampOfLastHydrationUs, maxPeriodWithNoHydrationUs, esp_timer_get_time());
 
@@ -424,25 +431,16 @@ static void communication_task(void* pvParameters)
     static int32_t advAttemptCount = 0;
     int64_t advStartedTimestampUs = 0;
     int64_t advEndTimestampUs = 0;
+    int64_t advRestartTimestampUs = 0;
 
     static const uint32_t taskDelayTicks = pdMS_TO_TICKS(500);
-    static const TickType_t FAILED_INIT_RETRY_DELAY = pdMS_TO_TICKS(1000);
 
     // El valor "watchdog" para evitar sincronizar registros infinitamente.
     static const uint16_t maxRecordsToSync = MAX_SYNC_QUEUE_LEN + MAX_STORED_RECORD_COUNT;
     static const uint16_t MAX_SYNC_ATTEMPTS = 3;
     static const TickType_t SYNC_FAILED_BACKOFF_DELAY = pdMS_TO_TICKS(5000);
 
-    esp_err_t ble_init_status = ESP_FAIL;
-
-    if (!params->useLazyBleEnable)
-    {
-        ble_init_status = ble_driver_init(CONFIG_BLE_DEVICE_NAME);
-
-        if (NULL == xSyncQueue || ble_init_status != ESP_OK)  {
-            ESP_LOGE(TAG, "Error de inicializacion del driver de BLE (%s)", esp_err_to_name(ble_init_status));
-        }
-    }
+    esp_err_t ble_init_error = ESP_FAIL;
 
     esp_err_t bleRegisterPwrManagerStatus = add_module_to_notify_before_deep_sleep(taskTag);
 
@@ -456,13 +454,11 @@ static void communication_task(void* pvParameters)
     BaseType_t aboutToEnterSleep = pdFALSE;
     esp_err_t bleShutdownStatus = ESP_OK;
 
-    static ble_status_t ble_pair_status = INACTIVE;
+    static ble_status_t ble_driver_status = INACTIVE;
     static BaseType_t did_status_change = pdFALSE;
 
     while (true) 
     {
-        int32_t numOfRecordsPendingSync = uxQueueMessagesWaiting(xSyncQueue);
-
         taskWasNotified = xTaskNotifyWait((uint32_t) 0, (uint32_t) 0, &notify_value, (TickType_t) 0);
 
         if (taskWasNotified)
@@ -470,176 +466,198 @@ static void communication_task(void* pvParameters)
             aboutToEnterSleep = is_notify_for_deep_sleep_start(notify_value);
         }
 
-        ble_status_t previous_ble_status = ble_pair_status;
-        ble_pair_status = ble_wait_for_state(PAIRED, true, (TickType_t) 0);
-        did_status_change = previous_ble_status != ble_pair_status;
+        ble_status_t previous_ble_status = ble_driver_status;
+        ble_driver_status = ble_wait_for_state(PAIRED, true, (TickType_t) 0);
+        did_status_change = previous_ble_status != ble_driver_status;
 
-        if (ESP_OK == ble_init_status)
+        switch (ble_driver_status)
         {
-            if (PAIRED == ble_pair_status) 
+        case PAIRED:
+        {
+            if (taskWasNotified && aboutToEnterSleep)
             {
-                if (taskWasNotified && aboutToEnterSleep)
+                bleShutdownStatus = ble_disconnect();
+
+                if (ESP_OK == bleShutdownStatus)
                 {
-                    bleShutdownStatus = ble_disconnect();
-
-                    if (ESP_OK == bleShutdownStatus)
-                    {
-                        continue;
-                    } else 
-                    {
-                        ESP_LOGW(TAG, "Error al desconectar BLE (%s)", esp_err_to_name(bleShutdownStatus));
-                    }
+                    continue;
+                } else 
+                {
+                    ESP_LOGW(TAG, "Error al desconectar BLE (%s)", esp_err_to_name(bleShutdownStatus));
                 }
+            }
 
-                int16_t synchronizedRecordsCount = 0;
-                int16_t syncAttemptsForCurrentRecord = 0;
+            int16_t synchronizedRecordsCount = 0;
+            int16_t syncAttemptsForCurrentRecord = 0;
 
-                int32_t totalRecordsPendingSync = uxQueueMessagesWaiting(xSyncQueue);
+            int32_t totalRecordsPendingSync = uxQueueMessagesWaiting(xSyncQueue);
 
-                BaseType_t hasRemainingRecordsToSync = totalRecordsPendingSync > 0;
+            BaseType_t hasRemainingRecordsToSync = totalRecordsPendingSync > 0;
 
-                // Iterar mientras la extensión esté PAIRED, queden registros de hidratación 
-                // por sincronizar, los intentos de sincronización no superen a MAX_SYNC_ATTEMPTS
-                //  y la cuenta total de registros sincronizados no supere a maxRecordsToSync.      
-                while (PAIRED == ble_pair_status && hasRemainingRecordsToSync && 
-                    syncAttemptsForCurrentRecord < MAX_SYNC_ATTEMPTS && synchronizedRecordsCount < maxRecordsToSync
-                ) {
-                    esp_err_t sync_status = sync_next_record_with_ble();
+            // Iterar mientras la extensión esté PAIRED, queden registros de hidratación 
+            // por sincronizar, los intentos de sincronización no superen a MAX_SYNC_ATTEMPTS
+            //  y la cuenta total de registros sincronizados no supere a maxRecordsToSync.      
+            while (PAIRED == ble_driver_status && hasRemainingRecordsToSync && 
+                syncAttemptsForCurrentRecord < MAX_SYNC_ATTEMPTS && synchronizedRecordsCount < maxRecordsToSync
+            ) {
+                esp_err_t sync_status = sync_next_record_with_ble();
 
-                    if (ESP_OK == sync_status)
-                    {
-                        // El registro de hidratación fue recibido por el
-                        // cliente con éxito. Indicarlo con una variable "bandera":
-                        ++synchronizedRecordsCount;
-                        syncAttemptsForCurrentRecord = 0;
-
-                        ESP_LOGI(TAG, "Registro obtenido por el dispositivo periferico, restantes = %i", 
-                                 (totalRecordsPendingSync - synchronizedRecordsCount));
-                    } else if (ESP_ERR_TIMEOUT == sync_status)
-                    {
-                        ++syncAttemptsForCurrentRecord;
-                        ESP_LOGW(
-                            TAG, 
-                            "Registro sincronizado, pero no fue obtenido por dispositivo periferico, restantes = %i",
-                            (totalRecordsPendingSync - synchronizedRecordsCount)
-                        );
-                    } else {
-                        ESP_LOGW(
-                            TAG, 
-                            "Error al sincronizar registro con BLE (%s)",
-                            esp_err_to_name(sync_status)
-                        );
-                    }
-
-                    // Revisar si el dispotivo periférico todavía está emparejado.
-                    ble_pair_status = ble_wait_for_state(PAIRED, true, 0);
-
-                    hasRemainingRecordsToSync = synchronizedRecordsCount < totalRecordsPendingSync;
-                }
-
-                if (syncAttemptsForCurrentRecord >= MAX_SYNC_ATTEMPTS) {
-                    vTaskDelay(SYNC_FAILED_BACKOFF_DELAY);
+                if (ESP_OK == sync_status)
+                {
+                    // El registro de hidratación fue recibido por el
+                    // cliente con éxito. Indicarlo con una variable "bandera":
+                    ++synchronizedRecordsCount;
                     syncAttemptsForCurrentRecord = 0;
-                }
-            } else if (ADVERTISING == ble_pair_status)
-            {
-                if (did_status_change)
+
+                    ESP_LOGI(TAG, "Registro obtenido por el dispositivo periferico, restantes = %i", 
+                                (totalRecordsPendingSync - synchronizedRecordsCount));
+                } else if (ESP_ERR_TIMEOUT == sync_status)
                 {
-                    advStartedTimestampUs = esp_timer_get_time();
-                    ++advAttemptCount;
-
-                    if (advAttemptCount == 1)
-                    {
-                        advEndTimestampUs = advStartedTimestampUs + (CONFIG_BLE_FIRST_ADV_DURATION_MS * 1000);
-                    } else 
-                    {
-                        advEndTimestampUs = advStartedTimestampUs + (CONFIG_BLE_ADDITIONAL_ADV_DURATION_MS * 1000);
-                    }
-                }
-
-                if (taskWasNotified && aboutToEnterSleep && ESP_OK == bleShutdownStatus)
-                {
-                    bleShutdownStatus = ble_stop_advertising();
-
-                    if (ESP_OK != bleShutdownStatus)
-                    {
-                        ESP_LOGW(TAG, "Error al detener advertising BLE (%s)", esp_err_to_name(bleShutdownStatus));
-                    }
+                    ++syncAttemptsForCurrentRecord;
+                    ESP_LOGW(
+                        TAG, 
+                        "Registro sincronizado, pero no fue obtenido por dispositivo periferico, restantes = %i",
+                        (totalRecordsPendingSync - synchronizedRecordsCount)
+                    );
+                } else {
+                    ESP_LOGW(
+                        TAG, 
+                        "Error al sincronizar registro con BLE (%s)",
+                        esp_err_to_name(sync_status)
+                    );
                 }
 
-                BaseType_t advAttemptLimitReached = advAttemptCount > (1 + CONFIG_BLE_ADDITIONAL_ADV_ATTEMPT_COUNT);
+                // Revisar si el dispotivo periférico todavía está emparejado.
+                ble_driver_status = ble_wait_for_state(PAIRED, true, 0);
 
-                if (advAttemptLimitReached)
-                {
-                    ESP_LOGI(TAG, "BLE advertise attempt limit reached");
-                    if (NULL != xDeepSleepConditionEvents)
-                    {
-                        xEventGroupSetBits(xDeepSleepConditionEvents, BLE_INACTIVE_BIT);
-                    }
-                } else if (esp_timer_get_time() > advEndTimestampUs)
-                {
-                    ESP_LOGI(TAG, "Timeout de advertising BLE alcanzado: %lld > %lld", esp_timer_get_time(), advEndTimestampUs);
-                    // Ya pasó más de la duración esperada del advertising, pero 
-                    // no el limite de intentos. Entrar en light sleep.
-                    // esp_err_t ble_shutdown_status = ble_driver_shutdown();
-                    esp_err_t ble_shutdown_status = ESP_OK;
-
-                    if (ESP_OK == ble_shutdown_status)
-                    {
-                        ESP_LOGI(TAG, "Transfiriendo registros de hidratacion de xSyncQueue a xStorageQueue");
-                        ble_shutdown_status = transfer_hydration_records_from_queue(
-                            xSyncQueue, 
-                            xStorageQueue,
-                            MAX_RECORD_QUEUE_LEN, 
-                            pdMS_TO_TICKS(50)
-                        );
-                    }
-                    
-                    if (ESP_OK == ble_shutdown_status) 
-                    {
-                        ble_shutdown_status = ble_stop_advertising();
-                    }
-
-                    if (ESP_OK != ble_shutdown_status)
-                    {
-                        ESP_LOGW(TAG, "Error al detener advertising BLE (%s)", esp_err_to_name(ble_shutdown_status));
-                    }
-
-                    if (ESP_OK == ble_shutdown_status)
-                    {
-                        ble_shutdown_status = ble_driver_shutdown();
-                    }
-
-                    if (ESP_OK == ble_shutdown_status)
-                    {
-                        ESP_LOGI(TAG, "Starting light sleep on BLE advertising timeout");
-                        // esp_err_t light_sleep_status = enter_light_sleep(CONFIG_BLE_ADVERTISING_SLEEP_INTERVAL_MS * 1000ULL);
-
-                        // if (ESP_OK != light_sleep_status)
-                        // {
-                        //     ESP_LOGW(TAG, "Error al intentar entrar en light sleep (%s)", esp_err_to_name(light_sleep_status));
-                        // }
-                    }
-
-                    // TODO: reiniciar advertising después de 1min. de light sleep.
-                }
+                hasRemainingRecordsToSync = synchronizedRecordsCount < totalRecordsPendingSync;
             }
 
-        } else if (params->useLazyBleEnable == pdFALSE || numOfRecordsPendingSync > 0)
+            if (syncAttemptsForCurrentRecord >= MAX_SYNC_ATTEMPTS) {
+                vTaskDelay(SYNC_FAILED_BACKOFF_DELAY);
+                syncAttemptsForCurrentRecord = 0;
+            }
+        }
+            break;
+        case ADVERTISING:
         {
-            ESP_LOGI(TAG, "BLE late init");
-            ble_init_status = ble_driver_init(CONFIG_BLE_DEVICE_NAME);
+            if (did_status_change)
+            {
+                advStartedTimestampUs = esp_timer_get_time();
+                ++advAttemptCount;
 
-            if (NULL == xSyncQueue || ble_init_status != ESP_OK)  {
-                ESP_LOGE(TAG, "Error de inicializacion del driver de BLE (%s)", esp_err_to_name(ble_init_status));
-                vTaskDelay(FAILED_INIT_RETRY_DELAY);
+                if (advAttemptCount == 1)
+                {
+                    advEndTimestampUs = advStartedTimestampUs + (CONFIG_BLE_FIRST_ADV_DURATION_MS * 1000);
+                } else 
+                {
+                    advEndTimestampUs = advStartedTimestampUs + (CONFIG_BLE_ADDITIONAL_ADV_DURATION_MS * 1000);
+                }
             }
+
+            if (taskWasNotified && aboutToEnterSleep && ESP_OK == bleShutdownStatus)
+            {
+                bleShutdownStatus = ble_stop_advertising();
+
+                if (ESP_OK != bleShutdownStatus)
+                {
+                    ESP_LOGW(TAG, "Error al detener advertising BLE (%s)", esp_err_to_name(bleShutdownStatus));
+                }
+            }
+
+            BaseType_t advAttemptLimitReached = did_status_change && advAttemptCount > (1 + CONFIG_BLE_ADDITIONAL_ADV_ATTEMPT_COUNT);
+
+            if (advAttemptLimitReached)
+            {
+                ESP_LOGI(TAG, "BLE advertise attempt limit reached");
+                if (NULL != xDeepSleepConditionEvents)
+                {
+                    xEventGroupSetBits(xDeepSleepConditionEvents, BLE_INACTIVE_BIT);
+                }
+            } else if (esp_timer_get_time() > advEndTimestampUs)
+            {
+                ESP_LOGI(TAG, "Timeout de advertising BLE alcanzado: %lld > %lld", esp_timer_get_time(), advEndTimestampUs);
+                ESP_LOGI(TAG, "Intentos de advertising BLE = %d/%d", advAttemptCount, CONFIG_BLE_ADDITIONAL_ADV_ATTEMPT_COUNT + 1);
+                // Ya pasó más de la duración esperada del advertising, pero 
+                // no el limite de intentos. Entrar en light sleep.
+                // esp_err_t ble_shutdown_status = ble_driver_shutdown();
+                esp_err_t ble_shutdown_status = ESP_OK;
+                advRestartTimestampUs = advEndTimestampUs + (CONFIG_BLE_ADVERTISING_SLEEP_INTERVAL_MS * 1000LL);
+
+                if (ESP_OK == ble_shutdown_status)
+                {
+                    ESP_LOGI(TAG, "Transfiriendo registros de hidratacion de xSyncQueue a xStorageQueue");
+                    ble_shutdown_status = transfer_hydration_records_from_queue(
+                        xSyncQueue, 
+                        xStorageQueue,
+                        MAX_RECORD_QUEUE_LEN, 
+                        pdMS_TO_TICKS(50)
+                    );
+                }
+                
+                if (ESP_OK == ble_shutdown_status) 
+                {
+                    ble_shutdown_status = ble_stop_advertising();
+                }
+
+                if (ESP_OK != ble_shutdown_status)
+                {
+                    ESP_LOGW(TAG, "Error al detener advertising BLE (%s)", esp_err_to_name(ble_shutdown_status));
+                }
+
+                if (ESP_OK == ble_shutdown_status)
+                {
+                    ble_shutdown_status = ble_driver_shutdown();
+                }
+
+                if (ESP_OK == ble_shutdown_status)
+                {
+                    ESP_LOGI(TAG, "Starting light sleep on BLE advertising timeout");
+                    // esp_err_t light_sleep_status = enter_light_sleep(CONFIG_BLE_ADVERTISING_SLEEP_INTERVAL_MS * 1000ULL);
+
+                    // if (ESP_OK != light_sleep_status)
+                    // {
+                    //     ESP_LOGW(TAG, "Error al intentar entrar en light sleep (%s)", esp_err_to_name(light_sleep_status));
+                    // }
+                }
+            }
+        } 
+            break;
+        case INITIALIZED:
+        {
+            UBaseType_t numOfRecordsPendingSync = uxQueueMessagesWaiting(xSyncQueue);
+            BaseType_t isBleEnableFromHydration = params->useLazyBleEnable && numOfRecordsPendingSync > 0;
+
+            BaseType_t canRetryAdv = advAttemptCount > 0 && esp_timer_get_time() >= advRestartTimestampUs;
+            
+            if (isBleEnableFromHydration || canRetryAdv)
+            {
+                esp_err_t ble_enable_status = ble_enable(CONFIG_BLE_DEVICE_NAME);
+
+                if (ESP_OK == ble_enable_status)
+                {
+                    ESP_LOGI(TAG, "Advertising BLE activado, intento = %d", advAttemptCount);
+                } else 
+                {
+                    ESP_LOGE(TAG, "Error al activar advertising (%s)", esp_err_to_name(ble_enable_status));
+                }
+            }
+        }
+            break;
+        case INACTIVE:
+            ble_init_error = ble_init();
+
+            if (NULL == xSyncQueue || ble_init_error != ESP_OK)  {
+                ESP_LOGE(TAG, "Error de inicializacion del driver de BLE (%s)", esp_err_to_name(ble_init_error));
+            }
+            break;
+        default:
+            break;
         }
 
         if (taskWasNotified && aboutToEnterSleep && ESP_OK == bleShutdownStatus)
         {
-            // Shutdown BLE
-            if (ESP_OK == ble_init_status)
+            if (ESP_OK == ble_init_error)
             {
                 if (ESP_OK == bleShutdownStatus)
                 {
@@ -1322,6 +1340,42 @@ static void get_comm_task_params(communication_task_param_t* const out_params, v
             out_params->useLazyBleEnable = pdFALSE;
         }
     }
+}
+
+static esp_err_t ble_init(void)
+{
+    esp_err_t status = ESP_OK;
+    ble_status_t driver_status = ble_wait_for_state(INACTIVE, true, (TickType_t) 0);
+
+    if (INACTIVE == driver_status)
+    {
+        if (ESP_OK == status)
+        {
+            status = ble_driver_init();
+            ESP_LOGI(TAG, "BLE init result (%s)", esp_err_to_name(status));
+        }
+    }
+
+    return status;
+}
+
+static esp_err_t ble_enable(const char* const device_name)
+{
+    esp_err_t status = ESP_OK;
+
+    if (ESP_OK == status)
+    {
+        status = ble_driver_enable(device_name);
+        ESP_LOGI(TAG, "BLE driver enable result (%s)", esp_err_to_name(status));
+    }
+
+    if (ESP_OK == status)
+    {
+        status = ble_driver_start_advertising();
+        ESP_LOGI(TAG, "BLE advertising start result (%s)", esp_err_to_name(status));
+    }
+
+    return status;
 }
 
 static esp_err_t sync_next_record_with_ble()
