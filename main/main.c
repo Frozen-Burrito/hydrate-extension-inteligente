@@ -31,10 +31,6 @@ static const char* TAG = "MAIN";
 #define MAX_RECORD_QUEUE_LEN 5
 #define MAX_SYNC_QUEUE_LEN 10
 #define BATTERY_LVL_QUEUE_SIZE 1
-
-#define NUM_SENSOR_MEASURES_PER_SECOND 5
-#define MAX_SENSOR_DATA_BUF_SECONDS 5
-#define MAX_SENSOR_DATA_BUF_LEN MAX_SENSOR_DATA_BUF_SECONDS * NUM_SENSOR_MEASURES_PER_SECOND
 #define MAX_HX711_DATA_QUEUE_LEN 1
 
 #define RECORD_RECEIVE_TIMEOUT_MS 500
@@ -114,6 +110,7 @@ static BaseType_t are_deep_sleep_conditions_met(void);
 static BaseType_t is_notify_for_deep_sleep_start(uint32_t notifyValue);
 
 static void init_battery_monitoring(void);
+static BaseType_t set_hydr_record_battery(hydration_record_t* const hydration_record);
 
 static esp_err_t ble_init(void);
 static esp_err_t ble_enable(const char* const device_name);
@@ -131,7 +128,7 @@ void app_main(void)
 
     if (ESP_OK == setup_status) 
     {      
-        xTaskCreatePinnedToCore(storage_task, "storage_task", 2048, NULL, 3, &xStorageTask, APP_CPU_NUM);
+        xTaskCreatePinnedToCore(storage_task, "storage_task", 4096, NULL, 3, &xStorageTask, APP_CPU_NUM);
         xTaskCreatePinnedToCore(hydration_inference_task, "hydr_infer_task", 4096, NULL, 3, &xHydrationInferenceTask, APP_CPU_NUM);
         xTaskCreatePinnedToCore(communication_task, "comm_sync_task", 4096, (void*) &comm_task_params, 4, &xCommunicationTask, APP_CPU_NUM);
 
@@ -248,11 +245,10 @@ static void hydration_inference_task(void* pvParameters)
 {
     static const char* taskTag = "hydr_inf";
 
+    sensor_measures_t sensor_data = {};
+
     static const TickType_t waitForDataTimeoutTicks = pdMS_TO_TICKS(1000);
     static const TickType_t dataReadIntervalTicks = pdMS_TO_TICKS(200);
-
-    static sensor_measures_t readingsBuffer[MAX_SENSOR_DATA_BUF_LEN] = {};
-    size_t indexOfLatestSensorReadings = 0;
 
     static int64_t maxPeriodWithNoHydrationUs = 30000000LL;
     int64_t timestampOfLastHydrationUs = esp_timer_get_time();
@@ -324,7 +320,7 @@ static void hydration_inference_task(void* pvParameters)
 
                 if (mpuHasData)
                 {
-                    readingsBuffer[indexOfLatestSensorReadings].accel_gyro_measurements = mpuData;
+                    sensor_data.accel_gyro_measurements = mpuData;
                 }
             }
 
@@ -336,27 +332,24 @@ static void hydration_inference_task(void* pvParameters)
 
         BaseType_t hx711_data_available = xQueueReceive(
             xHx711DataQueue,
-            &(readingsBuffer[indexOfLatestSensorReadings].weight_measurements),
+            &(sensor_data.weight_measurements),
             (TickType_t) 0
         );
 
-        bool sensor_measurements_available = mpuHasData == pdTRUE;
-
-        if (sensor_measurements_available) 
+        if (mpuHasData) 
         {
-            ESP_LOGI(TAG, "Measurements index = %d", indexOfLatestSensorReadings);
-            record_measurements_timestamp(&readingsBuffer[indexOfLatestSensorReadings]);
+            record_measurements_timestamp(&sensor_data);
 
-            // sensor_measures_t latest_sensor_data = readingsBuffer[indexOfLatestSensorReadings];
+            esp_err_t addSensorDataStatus = add_sensor_measurements(&sensor_data);
 
-            // log_sensor_measurements(&latest_sensor_data);
+            if (ESP_OK == addSensorDataStatus)
+            {
+                // log_sensor_measurements(&sensor_data);
+            }
 
             hydration_record_t hydrationRecord = {};
             
-            // Algoritmo para determinar si las mediciones en readingsBuffer
-            // son indicativas de consumo de agua.
-            bool was_hydration_recorded = hydration_record_from_measures(readingsBuffer, MAX_SENSOR_DATA_BUF_LEN, &hydrationRecord);
-            // bool was_hydration_recorded = !auxTestRecordCreated;
+            bool was_hydration_recorded = infer_hydration_from_sensors(&hydrationRecord);
 
             if (was_hydration_recorded) 
             {
@@ -364,19 +357,11 @@ static void hydration_inference_task(void* pvParameters)
 
                 timestampOfLastHydrationUs = esp_timer_get_time();
                 
-                // Obtener la carga restante de la batería, para asociarla
-                // con el registro de hidratación.
-                battery_measurement_t battery_measurement = {};
+                BaseType_t hydrRecordBatteryStatus = set_hydr_record_battery(&hydrationRecord);
 
-                BaseType_t batteryDataAvailable = xQueuePeek(
-                    xBatteryLevelQueue,
-                    &battery_measurement,
-                    (TickType_t) 0
-                );
-
-                if (batteryDataAvailable == pdPASS) 
+                if (!hydrRecordBatteryStatus)
                 {
-                    hydrationRecord.battery_level = battery_measurement.remaining_charge; 
+                    ESP_LOGW(TAG, "Error setting battery charge for hydration record");
                 }
                 
                 esp_err_t sendRecordStatus = send_record_to_sync(&hydrationRecord);
@@ -411,8 +396,6 @@ static void hydration_inference_task(void* pvParameters)
                     }
                 }
             }
-            
-            indexOfLatestSensorReadings = (indexOfLatestSensorReadings + 1) % MAX_SENSOR_DATA_BUF_LEN;
         }
 
         vTaskDelay(dataReadIntervalTicks);
@@ -829,6 +812,29 @@ static void init_battery_monitoring(void)
     // Comenzar el timer periodico para obtener mediciones del
     // nivel de bateria.
     xTimerStart(xBatteryMonitorTimer, (TickType_t) 0);
+}
+
+static BaseType_t set_hydr_record_battery(hydration_record_t* const hydration_record)
+{
+    if (NULL == hydration_record || NULL == xBatteryLevelQueue) 
+    {
+        return pdFALSE;
+    }
+
+    battery_measurement_t battery_measure = {};
+
+    BaseType_t wasBatteryDataAvailable = xQueuePeek(
+        xBatteryLevelQueue,
+        (&battery_measure),
+        (TickType_t) 0
+    );
+
+    if (wasBatteryDataAvailable)
+    {
+        hydration_record->battery_level = battery_measure.remaining_charge; 
+    }
+
+    return wasBatteryDataAvailable;
 }
 
 static void battery_monitor_callback(TimerHandle_t xTimer) 
