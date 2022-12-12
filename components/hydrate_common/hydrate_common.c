@@ -28,7 +28,7 @@ static const uint16_t max_volume_delta_ml = 250;
 
 static const int32_t lifted_raw_weight = 25000;
 
-static const int64_t hydration_cooldown_ms = 3000;
+static const int64_t hydration_cooldown_ms = 2000;
 
 static int64_t latest_hydration_timestamp_ms = 0;
 

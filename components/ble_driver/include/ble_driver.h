@@ -22,11 +22,11 @@
  * @brief Inicializa el driver BLE con sus perfiles GAP y GATT, para luego
  * comenzar el advertising.
  */ 
-esp_err_t ble_driver_init(const char* device_name);
+esp_err_t ble_driver_init(void);
 
-esp_err_t ble_driver_enable(void);
+esp_err_t ble_driver_enable(const char* device_name);
 
-esp_err_t ble_driver_sleep(void);
+esp_err_t ble_driver_start_advertising(void);
 
 esp_err_t ble_disconnect(void);
 
@@ -36,11 +36,11 @@ esp_err_t ble_driver_shutdown(void);
 
 esp_err_t ble_driver_deinit(void);
 
+esp_err_t ble_driver_sleep(void);
+
 esp_err_t ble_sync_battery_charge(uint8_t remaining_battery_charge);
 
 esp_err_t ble_synchronize_hydration_record(const hydration_record_t* record, const uint32_t sync_timeout_ms);
-
-uint32_t ble_get_advertising_start_ms(void);
 
 /**
  * @brief Esperar a que el status de la conexion BLE sea igual a status.
