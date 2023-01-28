@@ -105,11 +105,11 @@ static mpu6050_config_t mpu_config = {
 
 static void log_sensor_measurements(const sensor_measures_t* const measurements);
 
-static void init_power_management(BaseType_t* const wakeupFromEXT);
+static void init_power_management(BaseType_t* const outIsWakeupExternal);
 static BaseType_t are_deep_sleep_conditions_met(void);
 static BaseType_t is_notify_for_deep_sleep_start(uint32_t notifyValue);
 
-static void init_battery_monitoring(void);
+static esp_err_t init_battery_monitoring(void);
 static BaseType_t set_hydr_record_battery(hydration_record_t* const hydration_record);
 
 static esp_err_t ble_init(void);
@@ -330,13 +330,13 @@ static void hydration_inference_task(void* pvParameters)
             }
         }
 
-        BaseType_t hx711_data_available = xQueueReceive(
+        BaseType_t hx711HasData = xQueueReceive(
             xHx711DataQueue,
             &(sensor_data.weight_measurements),
             (TickType_t) 0
         );
 
-        if (mpuHasData) 
+        if (mpuHasData && hx711HasData) 
         {
             record_measurements_timestamp(&sensor_data);
 
@@ -344,7 +344,7 @@ static void hydration_inference_task(void* pvParameters)
 
             if (ESP_OK == addSensorDataStatus)
             {
-                // log_sensor_measurements(&sensor_data);
+                log_sensor_measurements(&sensor_data);
             }
 
             hydration_record_t hydrationRecord = {};
@@ -613,7 +613,8 @@ static void communication_task(void* pvParameters)
 
             BaseType_t canRetryAdv = advAttemptCount > 0 && esp_timer_get_time() >= advRestartTimestampUs;
             
-            if (isBleEnableFromHydration || canRetryAdv)
+            // if (isBleEnableFromHydration || canRetryAdv)
+            if (pdTRUE)
             {
                 esp_err_t ble_enable_status = ble_enable(CONFIG_BLE_DEVICE_NAME);
 
@@ -795,7 +796,7 @@ static void IRAM_ATTR mpu_data_rdy_isr(void* arg)
     }
 }
 
-static void init_battery_monitoring(void)
+static esp_err_t init_battery_monitoring(void)
 {
     battery_monitor_status = battery_monitor_init();
 
@@ -809,9 +810,22 @@ static void init_battery_monitoring(void)
         battery_monitor_callback
     );
 
-    // Comenzar el timer periodico para obtener mediciones del
-    // nivel de bateria.
-    xTimerStart(xBatteryMonitorTimer, (TickType_t) 0);
+    esp_err_t timerStatus = ESP_OK;
+
+    if (NULL != xBatteryMonitorTimer)
+    {
+        ESP_LOGW(TAG, "ESP_ERR_NO_MEM al inicializar monitoreo de batería");
+        timerStatus = ESP_ERR_NO_MEM;
+    }
+
+    if (ESP_OK == timerStatus)
+    {
+        // Comenzar el timer periodico para obtener mediciones del
+        // nivel de bateria.
+        xTimerStart(xBatteryMonitorTimer, (TickType_t) 0);
+    } 
+
+    return timerStatus;
 }
 
 static BaseType_t set_hydr_record_battery(hydration_record_t* const hydration_record)
@@ -870,9 +884,9 @@ static void battery_monitor_callback(TimerHandle_t xTimer)
     }
 } 
 
-static void init_power_management(BaseType_t* const wakeupFromEXT) 
+static void init_power_management(BaseType_t* const outIsWakeupExternal) 
 {
-    after_wakeup(wakeupFromEXT);
+    after_wakeup(outIsWakeupExternal);
     set_max_deep_sleep_duration(((int64_t) CONFIG_MAX_DEEP_SLEEP_DURATION_MS) * 1000);
 
     esp_err_t wakeupSourceStatus = setup_wakeup_sources((gpio_num_t) CONFIG_MPU_INT_GPIO);
@@ -882,15 +896,14 @@ static void init_power_management(BaseType_t* const wakeupFromEXT)
         ESP_LOGW(TAG, "Error al configurar fuentes de activacion de deep sleep (%s)", esp_err_to_name(wakeupSourceStatus));
     }
 
-    if (CONFIG_LIGHT_SLEEP_ENABLED)
-    {
-        esp_err_t lightSleepStatus = setup_light_sleep(true);
+#ifdef CONFIG_LIGHT_SLEEP_ENABLED
+    esp_err_t lightSleepStatus = setup_light_sleep(true);
 
-        if (ESP_OK != lightSleepStatus)
-        {
-            ESP_LOGW(TAG, "Error en setup de light sleep (%s)", esp_err_to_name(lightSleepStatus));
-        }
+    if (ESP_OK != lightSleepStatus)
+    {
+        ESP_LOGW(TAG, "Error en setup de light sleep (%s)", esp_err_to_name(lightSleepStatus));
     }
+#endif
 
     power_mgmt_timer_handle = xTimerCreate(
         "power_management_timer",
@@ -923,7 +936,8 @@ static void power_management_callback(TimerHandle_t xTimer)
 
     ESP_LOGI(TAG, "Should enter deep sleep? %s", (shouldEnterSleep) ? "yes" : "no");
 
-    if (CONFIG_DEEP_SLEEP_ENABLED && shouldEnterSleep)
+#ifdef CONFIG_DEEP_SLEEP_ENABLED
+    if (shouldEnterSleep)
     {
         const int32_t sleepEnterAttemptCount = increment_sleep_attempt_count();
         BaseType_t hasReachedRetryLimit = sleepEnterAttemptCount >= CONFIG_MAX_DEEP_SLEEP_ATTEMPTS;
@@ -965,6 +979,7 @@ static void power_management_callback(TimerHandle_t xTimer)
             ESP_LOGW(TAG, "Error al revisar si las tasks estan listas para deep sleep (%s)", esp_err_to_name(sleep_check_status));
         }
     }
+#endif
 }
 
 static esp_err_t app_startup(communication_task_param_t* const outCommunicationTaskParams) 

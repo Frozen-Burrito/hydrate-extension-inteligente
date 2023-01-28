@@ -33,7 +33,7 @@ esp_err_t setup_wakeup_sources(const gpio_num_t motionIntPin);
  * @brief Debería ser invocada por el programa principal después de despertar de 
  * sueño profundo, para configurar el manejo de poder y manejar la causa de wakeup. 
  */
-esp_err_t after_wakeup(BaseType_t* const wakeupFromEXT);
+esp_err_t after_wakeup(BaseType_t* const outIsWakeupExternal);
 
 /**
  * @brief Registra un módulo que necesita teardown antes de que el 

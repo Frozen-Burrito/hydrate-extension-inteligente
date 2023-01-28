@@ -80,7 +80,7 @@ esp_err_t hx711_init(hx711_t* device)
         init_status = hx711_set_gain(device, device->gain);
     }
 
-    if (ESP_OK == init_status) 
+    if (ESP_OK == init_status && device->interrupt_on_data) 
     {
         gpio_reset_pin(device->data_out);
 

@@ -44,7 +44,7 @@ static void calculate_sleep_duration(void);
 static const char* wakeup_cause_to_name(const esp_sleep_wakeup_cause_t wakeup_cause);
 static int32_t index_of_module_with_shutdown(const char* const module_tag);
 
-esp_err_t after_wakeup(BaseType_t* const wakeupFromEXT)
+esp_err_t after_wakeup(BaseType_t* const outIsWakeupExternal)
 {
     calculate_sleep_duration();
 
@@ -52,9 +52,9 @@ esp_err_t after_wakeup(BaseType_t* const wakeupFromEXT)
 
     esp_sleep_wakeup_cause_t wakeup_cause = esp_sleep_get_wakeup_cause();
 
-    if (NULL != wakeupFromEXT)
+    if (NULL != outIsWakeupExternal)
     {
-        *wakeupFromEXT = wakeup_cause == ESP_SLEEP_WAKEUP_EXT1; 
+        *outIsWakeupExternal = wakeup_cause == ESP_SLEEP_WAKEUP_EXT1; 
     }
 
     const char* cause_name = wakeup_cause_to_name(wakeup_cause);
