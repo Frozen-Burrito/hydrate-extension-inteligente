@@ -1,32 +1,46 @@
-# _Sample project_
+# Extensión Inteligente Hydrate
 
-(See the README.md file in the upper level 'examples' directory for more information about examples.)
+Este es el firmware usado por la extensión inteligente Hydrate, que es capaz de detectar y medir el consumo de líquidos desde una botella conectada. 
 
-This is the simplest buildable example. The example is used by command `idf.py create-project`
-that copies the project to user specified path and set it's name. For more information follow the [docs page](https://docs.espressif.com/projects/esp-idf/en/latest/api-guides/build-system.html#start-a-new-project)
+Para informar sobre un error, sugerir una características o hacer una pregunta, es posible usar la sección de [issues](https://github.com/Frozen-Burrito/hydrate-extension-inteligente/issues/new/choose). 
+
+## Características Principales
+
+La extensión inteligente Hydrate está orientada a cualquier persona que desee conocer mejor su consumo de agua a lo largo del día o que requiera apoyo para formar un hábito saludable de consumo de agua.
+
+La extensión logra esto a través de sus características principales, que incluyen:
+
+* Inferencia de hidratación, basada en el movimiento del dispositivo y el peso de la botella sobre él.
+* Compatibilidad con casi cualquier botella de agua reutilizable.
+* Integración inalámbrica con el dispositivo móvil, usando la app Hydrate.
+* Optimización de uso de energía, para soportar períodos de uso extendidos.
 
 
+## Estructura del Repositorio
 
-## How to use example
-We encourage the users to use the example as a template for the new projects.
-A recommended way is to follow the instructions on a [docs page](https://docs.espressif.com/projects/esp-idf/en/latest/api-guides/build-system.html#start-a-new-project).
+El proyecto **hydrate-extension-inteligente** está desarrollado usando el lenguaje C.  Contiene dos directorios principales: [main](main) y [components](components). Todo el firmware se encuentra en estos dos directorios, en varios archivos `.c` y `.h`.
 
-## Example folder contents
+Los proyectos basados en ESP-IDF son compilados usando CMake. La configuración de compilación del proyecto se encuentra en los múltiples archivos `CMakeLists.txt`,
+que proporcionan el conjunto de directivas e instrucciones para describir los archivos fuente y los targets
+(ejecutable, librería, o ambos). 
 
-The project **sample_project** contains one source file in C language [main.c](main/main.c). The file is located in folder [main](main).
-
-ESP-IDF projects are built using CMake. The project build configuration is contained in `CMakeLists.txt`
-files that provide set of directives and instructions describing the project's source files and targets
-(executable, library, or both). 
-
-Below is short explanation of remaining files in the project folder.
+Abajo se muestra una explicación breve de los archivos encontrados en el directorio del proyecto.
 
 ```
 ├── CMakeLists.txt
+├── .gitignore
 ├── main
 │   ├── CMakeLists.txt
+│   ├── idf_component.yml
+│   └── main.c
+├── components
+│   ├── storage
+|   |   ├── include
+|   |   └── storage.c
 │   └── main.c
 └── README.md                  This is the file you are currently reading
 ```
 Additionally, the sample project contains Makefile and component.mk files, used for the legacy Make based build system. 
 They are not used or needed when building with CMake and idf.py.
+
+## Recursos de Apoyo
